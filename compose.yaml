@@ -1,0 +1,63 @@
+# The tester stack (ADR-0006): a llama.cpp server, the Pi tester agent, and
+# the app. `docker compose up -d` starts the model server; the first run
+# downloads the model into the `models` volume.
+name: dating-tester
+
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server   # CPU; compose.gpu.yaml swaps in CUDA
+    entrypoint: ["/entrypoint.sh"]
+    environment:
+      MODEL_REPO: ${MODEL_REPO:-ibm-granite/granite-4.2-3b-GGUF:Q4_K_M}
+      MODEL_ALIAS: tester-model
+      CTX_SIZE: ${CTX_SIZE:-49152}                # 48K, ADR-0005; keep in step with tester/pi/models.json
+      THREADS: ${THREADS:-8}
+      LLAMA_CACHE: /models
+    volumes:
+      - models:/models
+      - ./tester/llama-entrypoint.sh:/entrypoint.sh:ro
+      - ./tester/model-allowlist.txt:/etc/model-allowlist.txt:ro
+    ports:
+      - "127.0.0.1:${LLAMA_PORT:-8081}:8080"                   # for poking at it from the host
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 600s                          # first run downloads the model
+
+  app:
+    build: .
+    mem_limit: 256m                               # same as fly.toml
+    environment:
+      PORT: "8080"
+    volumes:
+      - app-data:/data
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"         # spectator site + /mcp from the host
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tester:
+    build: ./tester
+    depends_on:
+      llama:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    environment:
+      APP_URL: http://app:8080
+      PI_OFFLINE: "1"
+    volumes:
+      - ./tester/pi/models.json:/home/node/.pi/agent/models.json:ro
+      - ./tester/pi/AGENTS.md:/home/node/.pi/agent/AGENTS.md:ro
+      - tester-work:/work
+    profiles: ["tester"]
+
+volumes:
+  app-data:
+  models:
+  tester-work:

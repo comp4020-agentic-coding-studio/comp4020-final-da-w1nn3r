@@ -1,0 +1,57 @@
+#!/bin/sh
+# A tiny MCP client for the tester agent, since Pi has no built-in MCP (ADR-0009).
+#   mcp tools                  list the service's tools
+#   mcp <tool> key=value ...   call a tool, e.g.  mcp swipe handle=bob direction=like
+#   mcp <tool> '<json>'        or pass one JSON object, e.g.  mcp swipe '{"handle":"bob","direction":"like"}'
+# A value that is valid JSON (a number, true, ["a","b"]) is sent as that; anything else as a string.
+# `register` saves your token to $TOKEN_FILE, and later calls send it automatically.
+set -eu
+URL="${APP_URL:-http://app:8080}/mcp"
+TOKEN_FILE="${TOKEN_FILE:-/work/.dating-token}"
+cmd="${1:-tools}"
+
+if [ "$cmd" = "tools" ]; then
+  body='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+else
+  shift
+  args='{}'
+  case "${1:-}" in
+    \{*) args="$1" ;;
+    *)
+      for kv in "$@"; do
+        case "$kv" in
+          *=*) ;;
+          *) echo "ERROR: '$kv' is not key=value. Example: mcp swipe handle=bob direction=like" >&2; exit 2 ;;
+        esac
+        args=$(printf "%s\n" "$args" | jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '.[$k] = ($v | try fromjson catch $v)')
+      done ;;
+  esac
+  body=$(jq -nc --arg n "$cmd" --argjson a "$args" '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:$n,arguments:$a}}' 2>/dev/null) \
+    || { echo "ERROR: could not read the arguments as JSON. Use key=value pairs instead, e.g. mcp register handle=my_bot display_name=Me bio='hello' model=my-model interests='[\"a\",\"b\"]' looking_for=friends emoji=🤖" >&2; exit 2; }
+fi
+
+set -- -sS -X POST "$URL" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream'
+[ -s "$TOKEN_FILE" ] && set -- "$@" -H "Authorization: Bearer $(cat "$TOKEN_FILE")"
+resp=$(curl "$@" -d "$body") || { echo "ERROR: could not reach $URL" >&2; exit 1; }
+
+if [ "$cmd" = "tools" ]; then
+  printf "%s\n" "$resp" | jq -r '.result.tools[] | "- \(.name): \(.description)\n    arguments: \(.inputSchema.properties | keys | join(", "))"'
+  exit 0
+fi
+
+if printf "%s\n" "$resp" | jq -e '.error' >/dev/null 2>&1; then
+  echo "ERROR: $(printf "%s\n" "$resp" | jq -r '.error.message')"; exit 1
+fi
+text=$(printf "%s\n" "$resp" | jq -r '.result.content[0].text')
+if [ "$(printf "%s\n" "$resp" | jq -r '.result.isError // false')" = "true" ]; then
+  printf "ERROR: %s\n" "$text"; exit 1
+fi
+if [ "$cmd" = "register" ]; then
+  printf "%s\n" "$text" | jq -r '.token' > "$TOKEN_FILE" && chmod 600 "$TOKEN_FILE"
+  printf "%s\n" "$text" | jq 'del(.token)'; echo "(your token was saved; you do not need to handle it)"
+else
+  printf "%s\n" "$text"
+fi
+# Later content blocks are a plain-English summary of what happened.
+printf "%s\n" "$resp" | jq -r '.result.content[1:][]?.text'
+if [ "$cmd" = "register" ]; then :; fi

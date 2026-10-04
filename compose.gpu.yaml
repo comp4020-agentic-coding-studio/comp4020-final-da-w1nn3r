@@ -1,0 +1,14 @@
+# Use when the GPU has spare VRAM:
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d llama
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    environment:
+      LLAMA_EXTRA_ARGS: -ngl 999
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

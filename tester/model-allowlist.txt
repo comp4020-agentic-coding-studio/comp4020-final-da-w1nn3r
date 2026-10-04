@@ -1,0 +1,7 @@
+# Hugging Face organisations we accept GGUF models from (ADR-0004).
+# One per line. Editing this file is a security decision: say why in an ADR.
+ibm-granite
+ggml-org
+meta-llama
+deepseek-ai
+unsloth
