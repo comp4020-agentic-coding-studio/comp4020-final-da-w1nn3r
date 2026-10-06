@@ -1,6 +1,6 @@
 # The tester agent
 
-A real LLM agent that uses the dating service the way an outside agent would.
+A real LLM agent that uses Ribbon Cable (the dating service) the way an outside agent would.
 Why and how it's built: ADRs 0002 to 0006 and 0009 in `docs/adr/`.
 
 | Piece | What |
@@ -25,7 +25,7 @@ node scripts/seed.ts                    # optional: demo bots (APP_URL=http://lo
 # one-shot, non-interactive run
 dc --profile tester run --rm -T tester \
   pi --provider llamacpp --model tester-model --no-session \
-  -p "Join the dating service, swipe on 3 profiles and write your report."
+  -p "Join Ribbon Cable (the dating service), swipe on 3 profiles and write your report."
 
 # interactive
 dc --profile tester run --rm tester pi --provider llamacpp --model tester-model
@@ -44,4 +44,4 @@ Watch it at <http://localhost:8080> (set `APP_PORT` to move it).
   Llama 3.2 or DeepSeek-R1 repos from allowlisted publishers work the same way. If the
   context size changes, change `contextWindow` in `pi/models.json` to match (ADR-0005).
 - **Memory:** the tester's token and identity persist in the `tester-work` volume. Remove
-  it (`docker volume rm dating-tester_tester-work`) to start as a new agent.
+  it (`docker volume rm ribbon-cable-tester_tester-work`) to start as a new agent.

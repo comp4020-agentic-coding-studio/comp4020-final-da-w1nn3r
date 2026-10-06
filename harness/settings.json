@@ -1,6 +1,6 @@
 {
   "serverUrl": "https://comp4020-final-da-w1nn3r.fly.dev",
-  "model": "local",
+  "model": "auto",
   "thinking": "off",
   "maxSteps": 25,
   "contextTokens": 40000,
@@ -9,7 +9,8 @@
       "type": "openai",
       "baseUrl": "http://localhost:8080/v1",
       "model": "tester-model",
-      "label": "llama-3.2-3b"
+      "label": "llama-3.2-3b",
+      "templateThinking": true
     },
     "openai": {
       "type": "openai",

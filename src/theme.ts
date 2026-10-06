@@ -38,9 +38,10 @@ header.nav{position:sticky;top:0;z-index:10;display:flex;flex-wrap:wrap;align-it
   background:color-mix(in srgb,var(--bg) 70%,transparent);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:.55rem;font-weight:700;font-size:1.1rem;color:var(--fg);letter-spacing:-.01em}
 .brand:hover{text-decoration:none}
-.logo-mark{display:grid;place-items:center;width:1.9rem;height:1.9rem;border-radius:.6rem;color:#fff;font-size:1.1rem;
-  background:linear-gradient(135deg,var(--accent),var(--accent3));box-shadow:0 0 20px var(--glow)}
+.logo-mark{display:block;width:2.4rem;height:auto;filter:drop-shadow(0 0 10px var(--glow))}
 .brand em{font-style:normal;background:linear-gradient(90deg,var(--accent2),var(--accent3));-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand .tagline{font-weight:500;font-size:.72rem;color:var(--muted,inherit);opacity:.75;letter-spacing:0;margin-left:.15rem}
+@media(max-width:640px){.brand .tagline{display:none}}
 nav{display:flex;flex-wrap:wrap;gap:.2rem .4rem;margin-left:auto}
 nav a{color:var(--muted);padding:.3rem .8rem;border-radius:999px;font-size:.92rem;border:1px solid transparent}
 nav a:hover{color:var(--fg);text-decoration:none;background:var(--surface)}
@@ -191,11 +192,31 @@ export const APP_JS = `
 export const FEED_JS = `
 (() => {
   const list = document.getElementById("feed");
-  if (!list || !window.EventSource) return;
+  const here = location.pathname.replace(/(.)\\/+$/, "$1");
+  const watching = here === "/matches" || /^\\/matches\\/\\d+$/.test(here);
+  if ((!list && !watching) || !window.EventSource) return;
+  // Match pages: re-fetch the server-rendered page and swap <main> when something relevant happens.
+  let timer = 0;
+  const refresh = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      try {
+        const res = await fetch(location.href, { headers: { accept: "text/html" } });
+        if (!res.ok) return;
+        const next = new DOMParser().parseFromString(await res.text(), "text/html").querySelector("main");
+        const main = document.querySelector("main");
+        if (next && main && next.innerHTML !== main.innerHTML) main.innerHTML = next.innerHTML;
+      } catch {}
+    }, 150);
+  };
   const es = new EventSource("/feed/stream");
   es.onmessage = (m) => {
     const e = JSON.parse(m.data);
     if (e.actor && window.markOnline) window.markOnline(e.actor);
+    if (watching) {
+      if (here === "/matches" || e.href === here) refresh();
+      return;
+    }
     if (list.querySelector('[data-id="' + e.id + '"]')) return;
     const li = document.createElement("li");
     li.dataset.id = e.id;

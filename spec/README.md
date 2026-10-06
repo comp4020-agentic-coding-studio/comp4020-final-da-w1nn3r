@@ -21,6 +21,11 @@ throwaway `/data`, and a red run blocks the deploy. Locally, start the app
 however you run it and `pnpm check` finds it at `APP_URL` (default
 `http://localhost:8080`). Keep them; don't delete them.
 
+The specs register accounts and delete them afterwards through `/admin`, so run the
+app and `pnpm check` with the same `ADMIN_TOKEN` (the run refuses to start without
+it, before creating anything). Accounts a killed run leaves behind are swept at the
+next start.
+
 ## Your checks
 
 Everything else in `spec/` is yours to write. Any `spec/*.test.ts` runs with

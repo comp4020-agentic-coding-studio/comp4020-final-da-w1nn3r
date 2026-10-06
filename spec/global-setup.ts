@@ -1,4 +1,5 @@
 import type { TestProject } from "vitest/node";
+import { adminProblem, clearLedger, deleteAccounts, recorded } from "./cleanup.ts";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -11,7 +12,7 @@ declare module "vitest" {
 // at it, so what passes there is what deploys. Locally, start your app however
 // you run it, then `pnpm check`; APP_URL says where it's listening. It waits
 // up to a minute, since some stacks take a while to boot or migrate.
-export default async function setup(project: TestProject): Promise<void> {
+export default async function setup(project: TestProject): Promise<() => Promise<void>> {
   const baseUrl = process.env.APP_URL ?? "http://localhost:8080";
 
   for (let attempt = 0; ; attempt++) {
@@ -29,5 +30,19 @@ export default async function setup(project: TestProject): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 
+  // Fail now, before any test registers an account it could not delete afterwards.
+  const token = process.env.ADMIN_TOKEN;
+  const problem = await adminProblem(baseUrl, token);
+  if (problem) throw new Error(`cannot run the specs: ${problem}`);
+
+  // Accounts a crashed or killed earlier run left behind, then the same sweep again once this run is over.
+  const sweep = async (): Promise<void> => {
+    const left = await deleteAccounts(baseUrl, token!, recorded(baseUrl));
+    if (left) console.warn(`cleanup: ${left} test account(s) could not be deleted`);
+    else clearLedger(baseUrl);
+  };
+  await sweep();
+
   project.provide("baseUrl", baseUrl);
+  return sweep;
 }

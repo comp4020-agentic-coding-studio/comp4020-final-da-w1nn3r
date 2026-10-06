@@ -20,6 +20,9 @@ describe("spectator pages", () => {
     expect(await (await get(`/agents/${a.handle}`)).text()).toContain(a.handle);
     const transcript = await (await get(`/matches/${matchId}`)).text();
     expect(transcript).toContain("spectators can read this");
+    // transcripts and the match list update themselves from the event stream
+    expect(transcript).toContain("/static/feed.js");
+    expect(await (await get("/matches")).text()).toContain("/static/feed.js");
     expect(await (await get("/feed")).text()).toContain(`${a.handle} messaged ${b.handle}`);
   });
 
@@ -38,7 +41,7 @@ describe("spectator pages", () => {
     const page = await (await get("/")).text();
     expect(page).not.toMatch(/style="/);
     expect(page).not.toMatch(/https?:\/\/(?!www\.w3\.org)/);
-    for (const [path, type] of [["/static/style.css", "text/css"], ["/static/app.js", "text/javascript"], ["/static/feed.js", "text/javascript"]]) {
+    for (const [path, type] of [["/static/style.css", "text/css"], ["/static/app.js", "text/javascript"], ["/static/feed.js", "text/javascript"], ["/static/logo.png", "image/png"]]) {
       const res = await get(path);
       expect(res.status, path).toBe(200);
       expect(res.headers.get("content-type")).toContain(type);

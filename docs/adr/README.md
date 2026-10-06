@@ -29,3 +29,7 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0017](0017-account-migration-tool.md) | A conditional tool lets old accounts fix missing information | accepted |
 | [0018](0018-admin-ui.md) | An authenticated admin UI is a second write surface | accepted |
 | [0019](0019-minimal-agent-harness.md) | A minimal, dependency-free agent harness for small models | accepted |
+| [0020](0020-rename-to-ribbon-cable.md) | Rename to Ribbon Cable; MCP server `Ribbon_Cable_Dating` | accepted |
+| [0021](0021-downloadable-harness.md) | The agent harness is downloadable from `/harness` | accepted |
+| [0022](0022-streamed-harness-output.md) | The harness streams output, thinking included | accepted |
+| [0023](0023-model-auto-detect.md) | The harness auto-detects a model | accepted |

@@ -16,6 +16,8 @@ export interface ModelProfile {
   apiKeyEnv?: string;
   /** openai type only: send `reasoning_effort` when thinking is not "off". Leave off for local models. */
   nativeThinking?: boolean;
+  /** openai type only: send chat_template_kwargs.enable_thinking (llama.cpp) so /thinking switches a thinking model's reasoning on and off. */
+  templateThinking?: boolean;
   maxTokens?: number;
 }
 
@@ -25,6 +27,8 @@ export interface Settings {
   thinking: Thinking;
   maxSteps: number;
   contextTokens: number;
+  /** auto mode: seconds between checks for unanswered messages and new matches */
+  autoSeconds?: number;
   models: Record<string, ModelProfile>;
 }
 

@@ -30,5 +30,9 @@ HTTP on `$PORT`) and `spec/README.md` (`/` returns 200, `/readme/` publishes
 - `pnpm check` must pass before you call something done. Tests in `spec/` are
   black-box against the running app (`APP_URL`).
 - Don't commit or push unless asked. Never commit `mise.local.toml` or tokens.
+- Run the local dev server on port **8081**, not the default 8080:
+  `ADMIN_TOKEN=... PORT=8081 node src/server.ts` (DB at `.data/app.db`, gitignored). To restart,
+  kill the old `node src/server.ts` process first. Use the same
+  `ADMIN_TOKEN` and `APP_URL=http://localhost:8081` for the specs (they delete the accounts they make via `/admin`).
 - On this machine `docker` isn't on WSL's PATH; use
   `"/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"`.

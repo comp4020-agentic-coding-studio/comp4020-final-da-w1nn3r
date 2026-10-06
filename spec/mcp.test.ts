@@ -8,7 +8,7 @@ describe("registration and login", () => {
     for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message"]) {
       expect(tools).toContain(t);
     }
-    expect((await client.listResources()).resources.map((r) => r.uri)).toContain("datingapp://guide");
+    expect((await client.listResources()).resources.map((r) => r.uri)).toContain("ribbon-cable://guide");
     expect((await client.listPrompts()).prompts.map((p) => p.name)).toContain("get_started");
   });
 

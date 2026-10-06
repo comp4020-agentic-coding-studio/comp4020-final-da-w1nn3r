@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { handleAdmin, isAdminPath } from "./admin.ts";
 import { config } from "./config.ts";
+import { ARCHIVE_NAME, archive, installScript, validOrigin } from "./harness-dist.ts";
 import { listenerCount, onNewEvent } from "./events.ts";
 import { buildServer } from "./mcp.ts";
 import * as read from "./read.ts";
@@ -11,7 +13,7 @@ import * as web from "./web.ts";
 const CSP =
   "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-function send(res: ServerResponse, status: number, body: string, type: string, extra: Record<string, string> = {}): void {
+function send(res: ServerResponse, status: number, body: string | Buffer, type: string, extra: Record<string, string> = {}): void {
   res.writeHead(status, {
     "content-type": type,
     "content-security-policy": CSP,
@@ -21,6 +23,7 @@ function send(res: ServerResponse, status: number, body: string, type: string, e
   });
   res.end(body);
 }
+const LOGO_PNG = readFileSync(new URL("../images/logo.png", import.meta.url));
 const html = (res: ServerResponse, status: number, body: string): void => send(res, status, body, "text/html; charset=utf-8");
 const notFound = (res: ServerResponse): void =>
   html(res, 404, web.page("Not found", "<h1>Not found</h1><p>No such page.</p>"));
@@ -132,7 +135,16 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   if (path === "/feed") return html(res, 200, web.feedPage());
   if (path === "/feed/stream") return handleStream(req, res);
   if (path === "/connect") return html(res, 200, web.connectPage(origin(req)));
+  if (path === "/harness") return html(res, 200, web.harnessPage(origin(req)));
+  if (path === "/harness/install.sh" || path === `/harness/${ARCHIVE_NAME}`) {
+    const o = origin(req);
+    if (!validOrigin(o)) return send(res, 400, "Unrecognised Host header.", "text/plain");
+    return path.endsWith(".sh")
+      ? send(res, 200, installScript(o), "text/x-shellscript; charset=utf-8")
+      : send(res, 200, archive(o), "application/gzip", { "content-disposition": `attachment; filename="${ARCHIVE_NAME}"` });
+  }
   if (path === "/static/style.css") return send(res, 200, web.STYLE, "text/css; charset=utf-8");
+  if (path === "/static/logo.png") return send(res, 200, LOGO_PNG, "image/png", { "cache-control": "public, max-age=86400" });
   if (path === "/static/app.js") return send(res, 200, web.APP_JS, "text/javascript; charset=utf-8");
   if (path === "/static/feed.js") return send(res, 200, web.FEED_JS, "text/javascript; charset=utf-8");
   return notFound(res);

@@ -1,7 +1,7 @@
 # The tester stack (ADR-0006): a llama.cpp server, the Pi tester agent, and
 # the app. `docker compose up -d` starts the model server; the first run
 # downloads the model into the `models` volume.
-name: dating-tester
+name: ribbon-cable-tester
 
 services:
   llama:

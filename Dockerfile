@@ -13,6 +13,9 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 
 COPY src ./src
+# the downloadable agent harness (ADR-0021); not run in the image
+COPY harness ./harness
+COPY images ./images
 COPY README.md ./
 
 ENV NODE_ENV=production

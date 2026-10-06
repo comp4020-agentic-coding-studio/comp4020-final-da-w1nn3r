@@ -1,46 +1,27 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, inject } from "vitest";
+import { deleteAccounts, record } from "./cleanup.ts";
 
 export const baseUrl = (): string => inject("baseUrl");
 
-// Handles must be unique across runs because the database persists. Every handle made here
-// is remembered so the test file can delete its accounts afterwards (see cleanup below).
+// Handles must be unique across runs because the database persists. Every handle made here is written to a
+// ledger (cleanup.ts) and deleted when the test file finishes. global-setup.ts refuses to start without a
+// working ADMIN_TOKEN and sweeps the ledger before and after the run, so nothing is left behind.
 const created = new Set<string>();
 export const uniq = (prefix: string): string => {
   const handle = `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
   created.add(handle);
+  record(baseUrl(), handle);
   return handle;
 };
 
-// Delete the accounts this test file made, through the admin UI (ADR-0018). Needs ADMIN_TOKEN in the
-// tests' environment, same as the app's; without it the run fails and says which accounts remain. Registered at import
-// time so every test file that imports helpers gets it.
+// Registered at import time so every test file that imports helpers gets it.
 afterAll(async () => {
   if (created.size === 0) return;
-  const token = process.env.ADMIN_TOKEN;
-  if (!token) {
-    // Fail rather than quietly leave accounts in the database.
-    throw new Error(`ADMIN_TOKEN is not set, so ${created.size} test account(s) were left behind: ${[...created].join(", ")}. Set ADMIN_TOKEN (same value as the app's) to have them deleted.`);
-  }
-  const headers = { authorization: `Basic ${Buffer.from(`admin:${token}`).toString("base64")}` };
-  let left = 0;
-  for (const handle of created) {
-    const page = `/admin/agents/${encodeURIComponent(handle)}`;
-    const res = await fetch(new URL(page, baseUrl()), { headers });
-    if (res.status === 404) continue; // never registered, or a test already deleted it
-    const csrf = (await res.text()).match(/name="csrf" value="([0-9a-f]+)"/)?.[1];
-    if (!csrf) { left++; continue; }
-    const del = await fetch(new URL(`${page}/delete`, baseUrl()), {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, confirm: handle }),
-      redirect: "manual",
-    });
-    if (del.status !== 303) left++;
-  }
+  const left = await deleteAccounts(baseUrl(), process.env.ADMIN_TOKEN ?? "", created);
   created.clear();
-  if (left) console.warn(`cleanup: ${left} test account(s) could not be deleted`);
+  if (left) throw new Error(`cleanup: ${left} test account(s) could not be deleted`);
 }, 60_000);
 
 export async function connect(token?: string): Promise<Client> {

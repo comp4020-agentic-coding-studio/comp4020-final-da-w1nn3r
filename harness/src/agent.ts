@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { chat, type Msg } from "./llm.ts";
+import { chat, type Kind, type Msg } from "./llm.ts";
 import { forget, indexForPrompt, readMemory, remember } from "./memory.ts";
 import { McpClient, McpError, type ToolInfo } from "./mcp.ts";
 import { activeProfile, clearAccount, getAccount, PERSONALITY_FILE, saveAccount, type Settings } from "./settings.ts";
@@ -150,13 +150,16 @@ export interface Agent {
   mcp: McpClient;
   tools: ToolInfo[];
   settings: Settings;
-  /** run one user turn to completion */
-  say(text: string, out: (s: string) => void): Promise<void>;
+  /** run one user turn to completion. With `live`, the model's output is shown as it is generated. */
+  say(text: string, out: (s: string) => void, live?: Live): Promise<void>;
   refreshTools(): Promise<void>;
   setServer(url: string): Promise<void>;
   logout(): void;
   account(): { handle: string; token: string } | undefined;
 }
+
+/** Receives the model's output as it streams: `token` per piece, `end` when a reply is finished. */
+export interface Live { token(kind: Kind, s: string): void; end(): void }
 
 const MAX_RESULT_CHARS = 5000;
 const approxTokens = (s: string): number => Math.ceil(s.length / 3.5);
@@ -208,7 +211,7 @@ export function makeAgent(settings: Settings): Agent {
     const acct = getAccount(settings.serverUrl);
     const tools = [...agent.tools.map(toolLine), ...LOCAL_TOOLS.map(toolLine)].join("\n");
     const think =
-      settings.thinking === "off" || activeProfile(settings).nativeThinking || activeProfile(settings).type === "anthropic"
+      settings.thinking === "off" || activeProfile(settings).nativeThinking || activeProfile(settings).templateThinking || activeProfile(settings).type === "anthropic"
         ? ""
         : `\nBefore each action, think it through briefly inside <think></think>${settings.thinking === "high" ? ", carefully and in detail" : ""}.`;
     return [
@@ -278,19 +281,37 @@ export function makeAgent(settings: Settings): Agent {
     return (r.isError && !text.startsWith("ERROR") ? "ERROR: " : "") + text.slice(0, MAX_RESULT_CHARS);
   }
 
-  async function say(text: string, out: (s: string) => void): Promise<void> {
+  async function say(text: string, out: (s: string) => void, live?: Live): Promise<void> {
     if (!agent.tools.length) await refreshTools();
     agent.history.push({ role: "user", content: text });
     for (let step = 0; step < settings.maxSteps; step++) {
       fit();
-      let reply = await chat(activeProfile(settings), system(), agent.history, settings.thinking);
-      // The model may invent the RESULT itself; cut it off there.
-      reply = reply.replace(/\n\s*RESULT\b[\s\S]*$/, "").trim();
+      // The model may invent the RESULT itself: stop generating there (the rest would be made up).
+      let shown = "";
+      const sink = (kind: Kind, s: string): boolean => {
+        if (kind === "think") {
+          live?.token("think", s);
+          return false;
+        }
+        shown += s;
+        const cut = shown.search(/\n\s*RESULT\b/);
+        if (cut < 0) {
+          live?.token("text", s);
+          return false;
+        }
+        const before = s.length - (shown.length - cut);
+        if (before > 0) live?.token("text", s.slice(0, before));
+        return true;
+      };
+      const got = await chat(activeProfile(settings), system(), agent.history, settings.thinking, sink);
+      live?.end();
+      const reasoning = got.reasoning;
+      let reply = got.text.replace(/\n\s*RESULT\b[\s\S]*$/, "").trim();
       if (process.env.HARNESS_DEBUG) console.error(`--- model said:\n${reply}\n---`);
-      const visible = reply.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      const visible = reply.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
       const names = [...agent.tools, ...LOCAL_TOOLS].map((t) => t.name);
       // Small models sometimes write the call inside <think>; if the visible text has none, look there too.
-      const call = parseCall(visible, names) ?? parseCall(reply.replace(/<\/?think>/g, ""), names);
+      const call = parseCall(visible, names) ?? parseCall((reply + "\n" + reasoning).replace(/<\/?think>/g, ""), names);
       // Keep only up to the first call in history: models imitate what they said before, and a reply that
       // planned five calls and invented their results teaches them to do it again.
       const found = call && call !== "malformed" ? call : undefined;
@@ -298,7 +319,8 @@ export function makeAgent(settings: Settings): Agent {
       const kept = found && at >= 0 ? reply.slice(0, at + found.line.length) : reply;
       agent.history.push({ role: "assistant", content: kept || "(no reply)" });
       if (!call) {
-        out(visible || "(no reply)");
+        if (!live) out(visible || "(no reply)");
+        else if (!visible) out(reasoning ? "(no answer: it used up its token budget thinking; raise maxTokens in settings.json)" : "(no reply)");
         return;
       }
       let result: string;
@@ -306,7 +328,7 @@ export function makeAgent(settings: Settings): Agent {
         result = 'ERROR: I could not read that. Write exactly: CALL tool_name key=value key=value  (example: CALL swipe handle=bob direction=like)';
         out("! malformed CALL");
       } else {
-        out(`> ${call.name} ${call.positional.join(" ")} ${Object.entries(call.args).map(([k, v]) => `${k}=${v.length > 40 ? v.slice(0, 40) + "…" : v}`).join(" ")}`);
+        if (!live) out(`> ${call.name} ${call.positional.join(" ")} ${Object.entries(call.args).map(([k, v]) => `${k}=${v.length > 40 ? v.slice(0, 40) + "…" : v}`).join(" ")}`);
         try {
           result = await runTool(call);
         } catch (err) {
