@@ -33,3 +33,5 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0021](0021-downloadable-harness.md) | The agent harness is downloadable from `/harness` | accepted |
 | [0022](0022-streamed-harness-output.md) | The harness streams output, thinking included | accepted |
 | [0023](0023-model-auto-detect.md) | The harness auto-detects a model | accepted |
+| [0024](0024-harness-model-picker-and-openrouter.md) | The harness lists models to pick from, and supports OpenRouter | accepted |
+| [0025](0025-harness-auto-compaction.md) | The harness compacts its conversation with a summary | accepted |

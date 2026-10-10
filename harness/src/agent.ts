@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { approxTokens, compactionSettings, cutPoint, summarize } from "./compact.ts";
 import { chat, type Kind, type Msg } from "./llm.ts";
 import { forget, indexForPrompt, readMemory, remember } from "./memory.ts";
 import { McpClient, McpError, type ToolInfo } from "./mcp.ts";
@@ -147,6 +148,8 @@ export function coerce(tool: ToolInfo, call: Call): Record<string, unknown> {
 // ---- the agent -------------------------------------------------------------------------------
 export interface Agent {
   history: Msg[];
+  /** What compaction made of the part of the conversation that was cut (ADR-0025); shown to the model in the system prompt. */
+  summary: string;
   mcp: McpClient;
   tools: ToolInfo[];
   settings: Settings;
@@ -155,6 +158,8 @@ export interface Agent {
   refreshTools(): Promise<void>;
   setServer(url: string): Promise<void>;
   logout(): void;
+  /** Summarize everything before the recent tail now. False when there was nothing to summarize or the model failed. */
+  compact(out: (s: string) => void, instructions?: string, keepRecent?: number): Promise<boolean>;
   account(): { handle: string; token: string } | undefined;
 }
 
@@ -162,12 +167,13 @@ export interface Agent {
 export interface Live { token(kind: Kind, s: string): void; end(): void }
 
 const MAX_RESULT_CHARS = 5000;
-const approxTokens = (s: string): number => Math.ceil(s.length / 3.5);
+const CONTINUE = "(Your earlier steps were summarized above. Carry on with the task.)";
 
 export function makeAgent(settings: Settings): Agent {
   const mcp = new McpClient(settings.serverUrl);
   const agent: Agent = {
     history: [],
+    summary: "",
     mcp,
     tools: [],
     settings,
@@ -175,6 +181,7 @@ export function makeAgent(settings: Settings): Agent {
     say,
     setServer,
     logout,
+    compact,
     account: () => getAccount(settings.serverUrl),
   };
 
@@ -200,6 +207,7 @@ export function makeAgent(settings: Settings): Agent {
       throw err;
     }
     agent.history = [];
+    agent.summary = "";
   }
 
   function logout(): void {
@@ -218,14 +226,39 @@ export function makeAgent(settings: Settings): Agent {
       readFileSync(PERSONALITY_FILE, "utf8").trim(),
       `## Tools\n${PROTOCOL}${think}\n\n${tools}\n(* = required)`,
       `## You\n${acct?.handle ? `You are logged in as @${acct.handle}. Your login is saved automatically: never ask for it or type it.` : "You have no account yet. Use register (invent your own handle, display_name and bio) before anything else."}`,
+      ...(agent.summary ? [`## Earlier in this conversation\nYour older messages were cut to save space. This is a summary of them:\n${agent.summary}`] : []),
       `## Memory\nThings you saved earlier (use read_memory name=... for details):\n${indexForPrompt()}`,
     ].join("\n\n");
   }
 
-  /** Keep the conversation inside the context window: shrink old results first, then drop old turns. */
-  function fit(): void {
+  const size = (): number => agent.history.reduce((n, m) => n + approxTokens(m.content), 0);
+
+  /** Summarize the messages before the cut point into agent.summary and drop them (Pi-style, ADR-0025). */
+  async function compact(out: (s: string) => void, instructions?: string, keepRecent = compactionSettings(settings).keepRecentTokens): Promise<boolean> {
+    const cut = cutPoint(agent.history, keepRecent);
+    if (!cut) return false;
+    const c = compactionSettings(settings);
+    const profile = c.model ? settings.models[c.model] : undefined;
+    if (c.model && !profile) out(`! compaction.model "${c.model}" is not in models; using the current model`);
+    const before = approxTokens(system()) + size();
+    let text: string;
+    try {
+      text = await summarize(profile ?? activeProfile(settings), agent.history.slice(0, cut.index), agent.summary, instructions);
+    } catch (err) {
+      out(`! could not summarize (${(err as Error).message})`);
+      return false;
+    }
+    agent.summary = text;
+    agent.history = [...(cut.split ? [{ role: "user" as const, content: CONTINUE }] : []), ...agent.history.slice(cut.index)];
+    out(`(compacted: ~${before} → ~${approxTokens(system()) + size()} tokens)`);
+    return true;
+  }
+
+  /** Keep the conversation inside the context window: compact when it nears the limit; if that is off or fails, shrink old results, then drop old turns. */
+  async function fit(out: (s: string) => void): Promise<void> {
+    const c = compactionSettings(settings);
+    if (c.enabled && approxTokens(system()) + size() > settings.contextTokens - c.reserveTokens) await compact(out);
     const budget = settings.contextTokens - approxTokens(system()) - 1500;
-    const size = (): number => agent.history.reduce((n, m) => n + approxTokens(m.content), 0);
     for (let i = 0; i < agent.history.length - 4 && size() > budget; i++) {
       const m = agent.history[i];
       if (m.content.startsWith("RESULT") && m.content.length > 200) m.content = m.content.slice(0, 120) + " ...(old result trimmed)";
@@ -285,7 +318,7 @@ export function makeAgent(settings: Settings): Agent {
     if (!agent.tools.length) await refreshTools();
     agent.history.push({ role: "user", content: text });
     for (let step = 0; step < settings.maxSteps; step++) {
-      fit();
+      await fit(out);
       // The model may invent the RESULT itself: stop generating there (the rest would be made up).
       let shown = "";
       const sink = (kind: Kind, s: string): boolean => {

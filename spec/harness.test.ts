@@ -4,7 +4,8 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { coerce, parseCall } from "../harness/src/agent.ts";
+import { coerce, makeAgent, parseCall } from "../harness/src/agent.ts";
+import { compactionSettings, cutPoint, summaryPrompt } from "../harness/src/compact.ts";
 import { autoPrompt, findPending } from "../harness/src/auto.ts";
 import { ThinkSplitter } from "../harness/src/llm.ts";
 import { baseUrl, call, connect, uniq } from "./helpers.ts";
@@ -122,7 +123,8 @@ describe("the harness end to end", () => {
     const saved = state.accounts[baseUrl()];
     expect(saved.handle).toBe(handle);
     expect(saved.token).toMatch(/^tok_/);
-    expect(statSync(join(dir, "state.json")).mode & 0o077).toBe(0);
+    // NTFS has no POSIX permission bits, so this only means something off Windows.
+    if (process.platform !== "win32") expect(statSync(join(dir, "state.json")).mode & 0o077).toBe(0);
 
     // the model never saw the secret, and was told it is logged in
     expect(JSON.stringify(requests)).not.toContain(saved.token);
@@ -187,4 +189,120 @@ describe("model auto-detect (ADR-0023)", () => {
       llama.server.close();
     }
   });
+
+  it("lists models from local servers and keyed providers, and resolves provider:model specs", async () => {
+    const { listChoices, resolveAuto } = await import("../harness/src/detect.ts");
+    const llama = await serve((u) => (u === "/v1/models" ? [200, { data: [{ id: "a.gguf" }, { id: "b.gguf" }] }] : [404, {}]));
+    try {
+      const { choices, notes } = await listChoices({}, [[llama.port, "llama.cpp"]]);
+      expect(choices.map((c) => c.spec)).toEqual([`local@${llama.port}:a.gguf`, `local@${llama.port}:b.gguf`]);
+      expect(notes).toEqual([]);
+      const s: any = { model: "openrouter:x/y", models: {} };
+      await resolveAuto(s);
+      expect(s.models["openrouter:x/y"]).toMatchObject({ baseUrl: "https://openrouter.ai/api/v1", model: "x/y", apiKeyEnv: "OPENROUTER_API_KEY" });
+      expect((await detectModelFor({ OPENROUTER_API_KEY: "k" }))?.profile.apiKeyEnv).toBe("OPENROUTER_API_KEY");
+    } finally {
+      llama.server.close();
+    }
+  });
+});
+
+async function detectModelFor(env: NodeJS.ProcessEnv) {
+  const { detectModel } = await import("../harness/src/detect.ts");
+  return detectModel(env, []);
+}
+
+describe("auto-compaction (ADR-0025)", () => {
+  const turn = (role: "user" | "assistant", content: string) => ({ role, content });
+  const big = (n: number) => "x".repeat(n);
+
+  it("cuts only at the start of a user turn, so a CALL keeps its RESULT", () => {
+    const h = [
+      turn("user", "first"), turn("assistant", big(700)),
+      turn("user", "second"), turn("assistant", "CALL whoami"), turn("user", "RESULT ok"), turn("assistant", "done"),
+      turn("user", "third"), turn("assistant", "ok"),
+    ];
+    expect(cutPoint(h, 1)).toEqual({ index: 6, split: false });
+    const cut = cutPoint(h, 12)!; // lands inside the second turn, so the cut moves back to its start
+    expect(h[cut.index].role).toBe("user");
+    expect(cut).toEqual({ index: 2, split: false });
+    expect(cutPoint(h.slice(0, 2), 0)).toBeNull(); // one turn, nothing before it
+  });
+
+  it("splits inside a single long turn, at an assistant message", () => {
+    const h = [turn("user", "go"), ...Array.from({ length: 6 }, (_, i) => turn(i % 2 ? "user" : "assistant", i % 2 ? `RESULT ${big(400)}` : `CALL step${i}`))];
+    const cut = cutPoint(h, 100)!;
+    expect(cut.split).toBe(true);
+    expect(h[cut.index].role).toBe("assistant");
+  });
+
+  it("builds a first summary, and folds the previous one into the next", () => {
+    const first = summaryPrompt([turn("user", "find me a match"), turn("user", "RESULT " + big(3000))], "");
+    expect(first).toContain("[User] find me a match");
+    expect(first).toContain("## Next Steps");
+    expect(first).toContain("(cut)"); // long results are truncated for the summarizer
+    expect(first).not.toContain("<previous-summary>");
+    const next = summaryPrompt([turn("user", "more")], "## Goal\nfind a match", "keep handles");
+    expect(next).toContain("<previous-summary>\n## Goal\nfind a match");
+    expect(next).toContain("Extra focus: keep handles");
+  });
+
+  it("defaults the window sizes from contextTokens and respects settings", () => {
+    expect(compactionSettings({ contextTokens: 40000 })).toMatchObject({ enabled: true, reserveTokens: 3000, keepRecentTokens: 10000 });
+    expect(compactionSettings({ contextTokens: 40000, compaction: { enabled: false, keepRecentTokens: 5 } })).toMatchObject({ enabled: false, keepRecentTokens: 5 });
+  });
+
+  // A scripted model that also plays the summarizer: it can be told to fail.
+  async function run(failSummary: boolean) {
+    const systems: string[] = [];
+    let summarizerCalls = 0;
+    const fake = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        const b = JSON.parse(body);
+        const isSummary = String(b.messages[0].content).startsWith("You write summaries");
+        if (isSummary && failSummary) { res.statusCode = 500; res.end("boom"); return; }
+        let content = "Noted.";
+        if (isSummary) { summarizerCalls++; content = "## Goal\nChat a lot\n## Progress\n### Done\nTalked about SENTINEL_FACT"; }
+        else systems.push(b.messages[0].content);
+        res.setHeader("content-type", "text/event-stream");
+        res.end(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`);
+      });
+    });
+    await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
+    const port = (fake.address() as { port: number }).port;
+    try {
+      const agent = makeAgent({
+        serverUrl: baseUrl(), model: "local", thinking: "off", maxSteps: 3, contextTokens: 3000,
+        compaction: { reserveTokens: 1600, keepRecentTokens: 300 },
+        models: { local: { type: "openai", baseUrl: `http://127.0.0.1:${port}/v1`, model: "fake" } },
+      } as any);
+      agent.tools = [{ name: "whoami", description: "Who am I.", inputSchema: {} } as any]; // skips fetching tools
+      const lines: string[] = [];
+      for (let i = 0; i < 8; i++) await agent.say(`${i === 0 ? "SENTINEL_FACT " : ""}message ${i} ${big(1500)}`, (s) => lines.push(s));
+      return { agent, systems, summarizerCalls, lines };
+    } finally {
+      fake.close();
+    }
+  }
+
+  it("summarizes the old part of a long conversation and shows the model the summary", async () => {
+    const { agent, systems, summarizerCalls, lines } = await run(false);
+    expect(summarizerCalls).toBeGreaterThan(0);
+    expect(agent.summary).toContain("SENTINEL_FACT");
+    expect(systems.at(-1)).toContain("## Earlier in this conversation");
+    expect(systems.at(-1)).toContain("SENTINEL_FACT");
+    expect(lines.some((l) => l.startsWith("(compacted"))).toBe(true);
+    expect(agent.history[0]).toMatchObject({ role: "user" });
+    expect(agent.history.every((m, i) => m.role === (i % 2 ? "assistant" : "user"))).toBe(true); // still alternates
+    expect(agent.history.length).toBeLessThan(16);
+  }, 30_000);
+
+  it("falls back to dropping old messages when the model cannot summarize", async () => {
+    const { agent, lines } = await run(true);
+    expect(agent.summary).toBe("");
+    expect(lines.some((l) => l.startsWith("! could not summarize"))).toBe(true);
+    expect(agent.history.length).toBeLessThan(16); // the old trim still keeps it inside the window
+  }, 30_000);
 });

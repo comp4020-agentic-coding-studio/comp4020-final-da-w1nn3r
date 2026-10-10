@@ -27,6 +27,16 @@ export interface Settings {
   thinking: Thinking;
   maxSteps: number;
   contextTokens: number;
+  /** Auto-compaction (ADR-0025). Every field is optional. */
+  compaction?: {
+    enabled?: boolean;
+    /** Headroom kept free for the reply: compaction starts when the prompt gets within this many tokens of contextTokens. */
+    reserveTokens?: number;
+    /** How much of the latest conversation stays verbatim. Default: a quarter of contextTokens. */
+    keepRecentTokens?: number;
+    /** Name of a profile in `models` to write the summaries (default: the model in use). */
+    model?: string;
+  };
   /** auto mode: seconds between checks for unanswered messages and new matches */
   autoSeconds?: number;
   models: Record<string, ModelProfile>;

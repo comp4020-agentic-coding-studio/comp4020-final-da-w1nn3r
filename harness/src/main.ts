@@ -6,12 +6,14 @@ import { makeAgent, type Live } from "./agent.ts";
 import { autoPrompt, findPending, type MatchInfo } from "./auto.ts";
 import type { Kind } from "./llm.ts";
 import { LOGO, renderLogo } from "./logo.ts";
-import { resolveAuto } from "./detect.ts";
+import { listChoices, resolveAuto, type Choice } from "./detect.ts";
 import { clearMemory, forget, listMemories } from "./memory.ts";
 import { activeProfile, loadSettings, PERSONALITY_FILE, saveLocal, THINKING, type Thinking } from "./settings.ts";
 
 const HELP = `Talk to the agent, or use a command:
-  /model [name]        show models, or switch (auto, local, openai, anthropic, or your own from settings.json)
+  /model [name]        show profiles and every model found, or switch (auto, local, openai, anthropic, openrouter, or your own from settings.json)
+  /model list [text]   list every model your servers and API keys offer (filter by text), numbered
+  /model <number>      pick from that list      /model <provider>:<id>   e.g. openrouter:anthropic/claude-sonnet-4.5
   /thinking [level]    off | low | medium | high
   /personality [edit|reset|<new text>]   show or change the personality
   /memory              list memories     /forget <name>   delete one     /forget all
@@ -19,6 +21,7 @@ const HELP = `Talk to the agent, or use a command:
   /server [url]        show or change the server (a different server means a different login)
   /whoami              ask the server who you are
   /logout              forget the saved login for this server
+  /compact [focus]     summarize the conversation so far now (it also happens by itself near the context limit)
   /reset               clear the conversation (memory and login are kept)
   /help   /quit`;
 
@@ -231,6 +234,8 @@ async function main(): Promise<void> {
   };
   if (flags.auto) setAuto(settings.autoSeconds ?? 30);
 
+  let lastList: Choice[] = [];
+
   async function command(line: string): Promise<boolean> {
     const [cmd, ...rest] = line.slice(1).split(/\s+/);
     const arg = rest.join(" ").trim();
@@ -241,10 +246,34 @@ async function main(): Promise<void> {
         out(HELP);
         break;
       case "model":
-        if (!arg) {
-          out(`${settings.model === "auto" ? "*" : " "} auto: use whatever local server or API key is found`);
-          for (const [k, p] of Object.entries(settings.models)) if (k !== "auto") out(`${k === settings.model ? "*" : " "} ${k}: ${p.type} ${p.model}${p.baseUrl ? ` @ ${p.baseUrl}` : ""}`);
-        } else {
+        if (!arg || arg === "list" || arg.startsWith("list ")) {
+          const filter = arg.slice(4).trim().toLowerCase();
+          if (!arg) {
+            out(`${settings.model === "auto" ? "*" : " "} auto: use whatever local server or API key is found`);
+            for (const [k, p] of Object.entries(settings.models)) if (k !== "auto") out(`${k === settings.model ? "*" : " "} ${k}: ${p.type} ${p.model}${p.baseUrl ? ` @ ${p.baseUrl}` : ""}`);
+            out("");
+          }
+          out("looking for models...");
+          const { choices, notes } = await listChoices();
+          for (const n of notes) out(n);
+          lastList = choices.filter((c) => c.spec.toLowerCase().includes(filter));
+          if (!lastList.length) out(choices.length ? `nothing matches "${filter}" (${choices.length} models)` : "no models found: start a local server or set ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY");
+          const shown = filter ? lastList.length : 40; // an unfiltered OpenRouter list is hundreds long
+          lastList.slice(0, shown).forEach((c, i) => out(`${String(i + 1).padStart(3)}  ${c.spec}`));
+          if (lastList.length > shown) out(`... and ${lastList.length - shown} more; narrow with /model list <text>`);
+          if (lastList.length) out(`pick one with /model <number> or /model <name>${filter ? "" : " (narrow the list with /model list <text>)"}`);
+          break;
+        }
+        if (/^\d+$/.test(arg)) {
+          const c = lastList[Number(arg) - 1];
+          if (!c) throw new Error(lastList.length ? `pick a number from 1 to ${lastList.length}` : "run /model list first");
+          settings.model = c.spec;
+          settings.models[c.spec] = c.profile;
+          saveLocal({ model: c.spec });
+          out(`model is now ${c.spec}`);
+          break;
+        }
+        {
           const before = settings.model;
           settings.model = arg;
           try {
@@ -317,8 +346,12 @@ async function main(): Promise<void> {
         agent.logout();
         out("saved login removed for this server");
         break;
+      case "compact":
+        if (!(await agent.compact(out, arg, 0))) out("nothing to compact yet");
+        break;
       case "reset":
         agent.history = [];
+        agent.summary = "";
         out("conversation cleared");
         break;
       default:

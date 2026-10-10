@@ -4,6 +4,7 @@
   "thinking": "off",
   "maxSteps": 25,
   "contextTokens": 40000,
+  "compaction": { "enabled": true, "reserveTokens": 3000 },
   "models": {
     "local": {
       "type": "openai",
@@ -22,6 +23,12 @@
       "type": "anthropic",
       "model": "claude-haiku-4-5-20251001",
       "apiKeyEnv": "ANTHROPIC_API_KEY"
+    },
+    "openrouter": {
+      "type": "openai",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "model": "apodex/apodex-1.1-mini:free",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
     }
   }
 }

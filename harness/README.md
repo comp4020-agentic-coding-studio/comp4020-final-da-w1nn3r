@@ -11,8 +11,11 @@ pnpm harness --model anthropic --thinking low
 
 With the default `"model": "auto"` there is nothing to configure: the harness looks for a
 local server (llama.cpp on 8081/8080, Ollama on 11434, LM Studio on 1234), then for
-`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, and uses the first it finds. It prints what it
-picked. Pin a model with `--model <name>`, `/model <name>`, or `model` in the settings.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, then `OPENROUTER_API_KEY`, and uses the first it finds. It prints what it
+picked. To choose yourself, run `/model list [text]` (every model your local servers and keys offer,
+numbered), then `/model <number>`, or name one directly: `--model openrouter:anthropic/claude-sonnet-4.5`
+(`provider:model-id`, provider = `anthropic`, `openai`, `openrouter` or a profile in settings).
+Pin a whole profile with `--model <name>`, `/model <name>`, or `model` in the settings.
 To change anything else, **edit `harness/settings.json`**:
 
 | Key | Meaning |
@@ -24,6 +27,7 @@ To change anything else, **edit `harness/settings.json`**:
 | `thinking` | `off`, `low`, `medium` or `high`. Thinking tokens count against `maxTokens`, so the harness adds a budget for them. |
 | `autoSeconds` | Auto mode's check interval (default 30). |
 | `maxSteps`, `contextTokens` | Tool calls per task; the model's context window, which the history is trimmed to. |
+| `compaction` | Auto-compaction (below): `enabled` (default true), `reserveTokens` (default 3000: compact when the prompt is this close to `contextTokens`), `keepRecentTokens` (default a quarter of `contextTokens`: kept word for word), `model` (a profile in `models` to write the summaries; default the model in use). |
 
 Personal overrides go in `harness/settings.local.json` (gitignored, same shape,
 merged over `settings.json`). Slash commands write there too.
@@ -40,16 +44,16 @@ the publishers in `tester/model-allowlist.txt`.
 ## Paid providers
 
 ```sh
-export ANTHROPIC_API_KEY=...       # or OPENAI_API_KEY
-pnpm harness --model anthropic
+export ANTHROPIC_API_KEY=...       # or OPENAI_API_KEY or OPENROUTER_API_KEY
+pnpm harness --model anthropic     # or openai, openrouter, or openrouter:<model-id>
 ```
 
-Add your own entries (OpenRouter, a bigger model, ...) under `models`.
+Add your own entries (a bigger model, another endpoint, ...) under `models`.
 
 ## Commands
 
 `/model [name]`, `/thinking [level]`, `/personality [edit|reset|<text>]`,
-`/auto [on|off|seconds]`, `/memory`, `/forget <name|all>`, `/server [url]`, `/whoami`, `/logout`, `/reset`,
+`/auto [on|off|seconds]`, `/compact [focus]`, `/memory`, `/forget <name|all>`, `/server [url]`, `/whoami`, `/logout`, `/reset`,
 `/help`, `/quit`.
 
 ## How it works
@@ -69,6 +73,7 @@ Add your own entries (OpenRouter, a bigger model, ...) under `models`.
   server) and every later call sends it. The model never sees or types it. Delete
   your account's entry or run `/logout` to start over.
 - **Personality:** `harness/personality.md`, the top of the system prompt.
+- **Compaction:** near the context limit the oldest messages are summarized by the model (Goal, Progress, Next Steps, Critical Context...) and dropped; the recent tail stays verbatim and the summary is shown in the system prompt. The next compaction updates the previous summary. `/compact [focus]` does it now. If summarizing fails, the oldest messages are dropped as before. A small local model writes weak summaries: set `compaction.model` to a stronger profile. ADR-0025.
 - **Memory:** `remember`, `read_memory` and `forget` tools. Notes are files in
   `harness/data/memory/` with a one-line-per-note `MEMORY.md` index, which is
   what the model sees each turn.
