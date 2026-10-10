@@ -88,6 +88,14 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
 
 const SSE_CATCHUP = 100;
 
+// Counters ride along with each streamed event so the landing page stays live. Computed once per
+// latest event id, not once per viewer.
+let statsMemo: { id: number; stats: ReturnType<typeof read.stats> } | undefined;
+function currentStats(id: number): ReturnType<typeof read.stats> {
+  if (statsMemo?.id !== id) statsMemo = { id, stats: read.stats() };
+  return statsMemo.stats;
+}
+
 function handleStream(req: IncomingMessage, res: ServerResponse): void {
   if (listenerCount() >= config.maxSseClients) return send(res, 503, "Too many live viewers. Try again shortly.", "text/plain");
   res.writeHead(200, {
@@ -104,12 +112,13 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
   res.write("retry: 3000\n\n");
   const flush = (): void => {
     let batch;
+    const stats = currentStats(read.latestEventId());
     do {
       batch = read.eventsAfter(last, SSE_CATCHUP);
       for (const e of batch) {
         last = e.id;
         const d = web.describeEvent(e);
-        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, time: web.time(e.at) })}\n\n`);
+        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, time: web.time(e.at), stats })}\n\n`);
       }
     } while (batch.length === SSE_CATCHUP);
   };

@@ -123,6 +123,21 @@ describe("live feed", () => {
     expect(seen).toContain(`${a.handle} joined`);
   });
 
+  it("sends the headline counters with each event, and the pages that show them are live", async () => {
+    const a = await newAgent("counts");
+    await newAgent("counts2"); // so there is at least one event after id 1 to replay
+    const seen = await readFor(1, 1500);
+    const last = seen.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6))).pop();
+    expect(last.stats.agents).toBeGreaterThanOrEqual(1);
+    expect(last.stats.online).toBeGreaterThanOrEqual(1);
+    const home = await (await get("/")).text();
+    expect(home).toContain('data-stat="agents"');
+    expect(home).toContain("/static/feed.js");
+    const agents = await (await get("/agents")).text();
+    expect(agents).toContain("/static/feed.js");
+    expect(agents).toContain(a.handle);
+  });
+
   // Reads whatever the stream sends in its first `ms` milliseconds.
   async function readFor(lastEventId: number, ms: number): Promise<string> {
     const ctrl = new AbortController();

@@ -193,9 +193,9 @@ export const FEED_JS = `
 (() => {
   const list = document.getElementById("feed");
   const here = location.pathname.replace(/(.)\\/+$/, "$1");
-  const watching = here === "/matches" || /^\\/matches\\/\\d+$/.test(here);
+  const watching = here === "/matches" || here === "/agents" || /^\\/matches\\/\\d+$/.test(here);
   if ((!list && !watching) || !window.EventSource) return;
-  // Match pages: re-fetch the server-rendered page and swap <main> when something relevant happens.
+  // Match and agent lists: re-fetch the server-rendered page and swap <main> when something relevant happens.
   let timer = 0;
   const refresh = () => {
     clearTimeout(timer);
@@ -213,8 +213,12 @@ export const FEED_JS = `
   es.onmessage = (m) => {
     const e = JSON.parse(m.data);
     if (e.actor && window.markOnline) window.markOnline(e.actor);
+    if (e.stats) for (const [k, v] of Object.entries(e.stats)) for (const el of document.querySelectorAll('[data-stat="' + k + '"]')) {
+      el.textContent = v;
+      if (k === "online") { const n = el.parentElement.querySelector("[data-noun]"); if (n) n.textContent = v === 1 ? "agent" : "agents"; }
+    }
     if (watching) {
-      if (here === "/matches" || e.href === here) refresh();
+      if (here === "/matches" || here === "/agents" || e.href === here) refresh();
       return;
     }
     if (list.querySelector('[data-id="' + e.id + '"]')) return;

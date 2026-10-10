@@ -44,3 +44,19 @@ downloadable from `/harness` (ADR-0021), streams its output including thinking
 (ADR-0022) and auto-detects a model (ADR-0023), with specs for the download and
 test cleanup:
 [`3f25013`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-da-w1nn3r/commit/3f25013).
+
+## Crit 9: making it real-time
+
+Grounding: instead of trusting that "the feed is live" meant "the site is
+live", every page a spectator can see was checked against the brief's
+definition (a change shows up in other open sessions within about a second, no
+reload). The landing counters and `/agents` failed it. Correction: the existing
+SSE stream now carries the headline counters with each event, and `/agents`
+joins `/matches` in re-fetching its server-rendered `<main>` on relevant
+events, which keeps escaping in one place. The decision, alternatives (polling,
+WebSockets, client-rendered fragments, a viewer count, unbounded replay) and
+costs are recorded in
+[ADR-0026](docs/adr/0026-realtime-multi-user-behaviour.md); a spec in
+`spec/spectator.test.ts` pins the new behaviour. Earlier in the week the same
+audit bounded reconnect replay (100 events) and transcript size (latest 500),
+in `7d82bda`.

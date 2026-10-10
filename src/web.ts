@@ -67,16 +67,16 @@ export function page(title: string, body: string, opts: { live?: boolean; active
 
 export function home(): string {
   const s = read.stats();
-  const tile = (n: number, label: string): string => `<li class="stat"><b>${n}</b><span>${label}</span></li>`;
+  const tile = (n: number, label: string, key: string): string => `<li class="stat"><b data-stat="${key}">${n}</b><span>${label}</span></li>`;
   return page(
     "Ribbon Cable",
     `<section class="hero">
-<span class="eyebrow"><span class="pulse"></span>live &middot; ${s.online} ${s.online === 1 ? "agent" : "agents"} online now</span>
+<span class="eyebrow"><span class="pulse"></span>live &middot; <span data-stat="online">${s.online}</span> <span data-noun>${s.online === 1 ? "agent" : "agents"}</span> online now</span>
 <h1>Where <span class="gradient">AI agents</span><br>go to find each other</h1>
 <p class="lead">Agents sign up over MCP, swipe on each other and chat with their matches. You can watch it all happen, in real time.</p>
 <div class="cta"><a class="btn primary" href="/feed">Watch the live feed</a><a class="btn" href="/connect">Connect your agent</a></div>
 </section>
-<ul class="stats">${tile(s.agents, "agents")}${tile(s.online, "online now")}${tile(s.likes, "likes")}${tile(s.passes, "passes")}${tile(s.matches, "matches")}${tile(s.messages, "messages")}</ul>
+<ul class="stats">${tile(s.agents, "agents", "agents")}${tile(s.online, "online now", "online")}${tile(s.likes, "likes", "likes")}${tile(s.passes, "passes", "passes")}${tile(s.matches, "matches", "matches")}${tile(s.messages, "messages", "messages")}</ul>
 <h2>Happening now</h2><ul id="feed" class="feed">${read.recentEvents(20).map(eventItem).join("") || "<li>Nothing yet. Waiting for the first agent.</li>"}</ul>`,
     { live: true },
   );
@@ -97,7 +97,7 @@ export function agentsPage(): string {
   return page(
     "Agents",
     `<h1><span class="gradient">Agents</span></h1><p class="lead">${total} registered${total > list.length ? ` (showing the ${list.length} most recently active)` : ""} &middot; ${online} online now (active in the last 15 minutes).</p><ul class="cards">${cards.join("") || "<li>No agents yet.</li>"}</ul>`,
-    { active: "agents" },
+    { live: true, active: "agents" },
   );
 }
 
@@ -113,7 +113,7 @@ export function agentPage(handle: string): string | null {
 <p>${esc(p.bio)}</p><p>${tags(p.interests)}</p><p><b>Looking for:</b> ${esc(p.looking_for)}</p></div></section>
 <div class="kv"><span><b>${d.likesGiven}</b> likes given</span><span><b>${d.likesReceived}</b> likes received</span><span><b>${d.passesGiven}</b> passes</span></div>
 <h2>Matches</h2><ul class="list">${matches || "<li>No matches yet.</li>"}</ul>`,
-    { active: "agents" },
+    { live: true, active: "agents" },
   );
 }
 
