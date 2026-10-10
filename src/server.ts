@@ -86,6 +86,8 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
   await transport.handleRequest(req, res, body);
 }
 
+const SSE_CATCHUP = 100;
+
 function handleStream(req: IncomingMessage, res: ServerResponse): void {
   if (listenerCount() >= config.maxSseClients) return send(res, 503, "Too many live viewers. Try again shortly.", "text/plain");
   res.writeHead(200, {
@@ -96,19 +98,25 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     "x-content-type-options": "nosniff",
   });
   const header = Number(req.headers["last-event-id"]);
-  let last = Number.isFinite(header) && header > 0 ? header : read.latestEventId();
+  const latest = read.latestEventId();
+  // Replay at most SSE_CATCHUP missed events, so a stale or forged Last-Event-ID can't stream the whole history.
+  let last = Number.isFinite(header) && header > 0 ? Math.max(header, latest - SSE_CATCHUP) : latest;
   res.write("retry: 3000\n\n");
   const flush = (): void => {
-    for (const e of read.eventsAfter(last)) {
-      last = e.id;
-      const d = web.describeEvent(e);
-      res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, time: web.time(e.at) })}\n\n`);
-    }
+    let batch;
+    do {
+      batch = read.eventsAfter(last, SSE_CATCHUP);
+      for (const e of batch) {
+        last = e.id;
+        const d = web.describeEvent(e);
+        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, time: web.time(e.at) })}\n\n`);
+      }
+    } while (batch.length === SSE_CATCHUP);
   };
   flush(); // anything missed while disconnected, e.g. across a machine stop
   const off = onNewEvent(flush);
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
-  req.on("close", () => {
+  res.on("close", () => {
     off();
     clearInterval(ping);
   });
@@ -124,7 +132,13 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   if (path === "/readme") return html(res, 200, web.readmePage());
   if (path === "/agents") return html(res, 200, web.agentsPage());
   if ((m = path.match(/^\/agents\/([^/]+)$/))) {
-    const body = web.agentPage(decodeURIComponent(m[1]));
+    let handle: string;
+    try {
+      handle = decodeURIComponent(m[1]);
+    } catch {
+      return notFound(res); // malformed %-escape: no handle can match it
+    }
+    const body = web.agentPage(handle);
     return body ? html(res, 200, body) : notFound(res);
   }
   if (path === "/matches") return html(res, 200, web.matchesPage());

@@ -53,6 +53,10 @@ describe("spectator pages", () => {
     expect((await get("/matches/99999999")).status).toBe(404);
   });
 
+  it("404s (not 500s) for a malformed escape in an agent URL", async () => {
+    expect((await get("/agents/%E0%A4%A")).status).toBe(404);
+  });
+
   it("hides passes (counts only)", async () => {
     const a = await newAgent();
     const b = await newAgent();
@@ -117,5 +121,38 @@ describe("live feed", () => {
     }
     ctrl.abort();
     expect(seen).toContain(`${a.handle} joined`);
+  });
+
+  // Reads whatever the stream sends in its first `ms` milliseconds.
+  async function readFor(lastEventId: number, ms: number): Promise<string> {
+    const ctrl = new AbortController();
+    const res = await fetch(new URL("/feed/stream", baseUrl()), { signal: ctrl.signal, headers: { "last-event-id": String(lastEventId) } });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let seen = "";
+    const stop = Date.now() + ms;
+    while (Date.now() < stop) {
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise<{ value: undefined; done: true }>((r) => setTimeout(() => r({ value: undefined, done: true }), stop - Date.now())),
+      ]);
+      if (done) break;
+      seen += decoder.decode(value);
+    }
+    ctrl.abort();
+    return seen;
+  }
+
+  it("replays events missed since Last-Event-ID on reconnect", async () => {
+    const a = await newAgent("replay");
+    const feed = await (await get("/feed")).text();
+    const id = Number(feed.match(new RegExp(`data-id="(\\d+)"><time>[^<]*</time> <a [^>]*>${a.handle} joined`))?.[1]);
+    expect(id).toBeGreaterThan(0);
+    expect(await readFor(id - 1, 1000)).toContain(`${a.handle} joined`);
+  });
+
+  it("caps the replay for a very old Last-Event-ID", async () => {
+    const seen = await readFor(1, 1000);
+    expect(seen.match(/^id: /gm)?.length ?? 0).toBeLessThanOrEqual(100);
   });
 });

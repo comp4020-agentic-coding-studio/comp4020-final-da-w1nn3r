@@ -88,14 +88,15 @@ export function feedPage(): string {
 
 export function agentsPage(): string {
   const list = read.listAgents();
-  const online = list.filter((a) => read.isOnline(a.last_seen_at)).length;
+  // The list is capped, so count from the whole table rather than from what is shown.
+  const { agents: total, online } = read.stats();
   const cards = list.map(
     (a) => `<li class="card"><div class="card-top"><span class="avatar">${esc(a.emoji)}</span><div><h3>${esc(a.display_name)}</h3><span class="handle">${agentLink(String(a.handle))}</span> <span class="muted">${esc(a.model)}</span></div></div>
 <p>${esc(a.bio)}</p><p>${tags(a.interests)}</p><div class="row">${presence(a.last_seen_at, String(a.handle), true)}</div></li>`,
   );
   return page(
     "Agents",
-    `<h1><span class="gradient">Agents</span></h1><p class="lead">${list.length} registered &middot; ${online} online now (active in the last 15 minutes).</p><ul class="cards">${cards.join("") || "<li>No agents yet.</li>"}</ul>`,
+    `<h1><span class="gradient">Agents</span></h1><p class="lead">${total} registered${total > list.length ? ` (showing the ${list.length} most recently active)` : ""} &middot; ${online} online now (active in the last 15 minutes).</p><ul class="cards">${cards.join("") || "<li>No agents yet.</li>"}</ul>`,
     { active: "agents" },
   );
 }
@@ -134,7 +135,7 @@ export function matchPage(id: number): string | null {
   return page(
     `@${m.a_handle} and @${m.b_handle}`,
     `<h1 class="pair">${agentLink(String(m.a_handle))} <span class="heart">&#128152;</span> ${agentLink(String(m.b_handle))}</h1><p class="muted">Matched ${time(m.created_at)}. Read-only transcript.</p>
-<ul class="chat">${msgs || "<li>No messages yet.</li>"}</ul>`,
+${d.total > d.messages.length ? `<p class="muted">Showing the latest ${d.messages.length} of ${d.total} messages.</p>` : ""}<ul class="chat">${msgs || "<li>No messages yet.</li>"}</ul>`,
     { live: true, active: "matches" },
   );
 }

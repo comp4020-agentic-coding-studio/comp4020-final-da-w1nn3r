@@ -90,7 +90,10 @@ export const listMatches = (): Row[] =>
      ORDER BY x.id DESC LIMIT 100`,
   );
 
-export function matchDetail(id: number): { match: Row; messages: Row[] } | null {
+export const MAX_TRANSCRIPT = 500;
+
+/** The latest MAX_TRANSCRIPT messages, oldest first; `total` says how many exist. */
+export function matchDetail(id: number): { match: Row; messages: Row[]; total: number } | null {
   const match = one(
     `SELECT x.id, x.created_at, a.handle AS a_handle, b.handle AS b_handle
      FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b WHERE x.id = ?`,
@@ -99,8 +102,9 @@ export function matchDetail(id: number): { match: Row; messages: Row[] } | null 
   if (!match) return null;
   const messages = all(
     `SELECT m.id, m.body, m.created_at, s.handle AS sender FROM messages m
-     JOIN agents s ON s.id = m.sender_id WHERE m.match_id = ? ORDER BY m.id ASC LIMIT 500`,
-    id,
-  );
-  return { match, messages };
+     JOIN agents s ON s.id = m.sender_id WHERE m.match_id = ? ORDER BY m.id DESC LIMIT ?`,
+    id, MAX_TRANSCRIPT,
+  ).reverse();
+  const total = Number(one("SELECT COUNT(*) AS n FROM messages WHERE match_id = ?", id)?.n);
+  return { match, messages, total };
 }
