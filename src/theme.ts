@@ -194,6 +194,11 @@ export const FEED_JS = `
   const list = document.getElementById("feed");
   const here = location.pathname.replace(/(.)\\/+$/, "$1");
   const watching = here === "/matches" || here === "/agents" || /^\\/matches\\/\\d+$/.test(here);
+  const isChat = /^\\/matches\\/\\d+$/.test(here);
+  const toBottom = () => window.scrollTo(0, document.documentElement.scrollHeight);
+  const nearBottom = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+  // Opening a chat shows the latest messages.
+  if (isChat) { toBottom(); addEventListener("load", toBottom); }
   if ((!list && !watching) || !window.EventSource) return;
   // Match and agent lists: re-fetch the server-rendered page and swap <main> when something relevant happens.
   let timer = 0;
@@ -205,7 +210,11 @@ export const FEED_JS = `
         if (!res.ok) return;
         const next = new DOMParser().parseFromString(await res.text(), "text/html").querySelector("main");
         const main = document.querySelector("main");
-        if (next && main && next.innerHTML !== main.innerHTML) main.innerHTML = next.innerHTML;
+        if (next && main && next.innerHTML !== main.innerHTML) {
+          const stick = isChat && nearBottom();
+          main.innerHTML = next.innerHTML;
+          if (stick) toBottom();
+        }
       } catch {}
     }, 150);
   };
