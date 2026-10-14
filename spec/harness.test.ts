@@ -3,12 +3,20 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { coerce, makeAgent, parseCall } from "../harness/src/agent.ts";
-import { compactionSettings, cutPoint, summaryPrompt } from "../harness/src/compact.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { callEnd, coerce, makeAgent, parseCall } from "../harness/src/agent.ts";
+import { compactionSettings, cutPoint, mentionedHandles, parsePeople, peoplePrompt, summaryPrompt } from "../harness/src/compact.ts";
 import { autoPrompt, findPending } from "../harness/src/auto.ts";
 import { ThinkSplitter } from "../harness/src/llm.ts";
 import { baseUrl, call, connect, uniq } from "./helpers.ts";
+
+// Compaction writes people notes: keep them out of the real harness/data.
+const HOME = vi.hoisted(() => {
+  const { mkdtempSync } = require("node:fs");
+  const dir = mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "harness-home-"));
+  process.env.HARNESS_HOME = dir;
+  return dir as string;
+});
 
 // The small-model harness (ADR-0019). The model is a scripted fake, so this checks the harness and its
 // contract with the service, not any real model's behaviour.
@@ -56,6 +64,90 @@ describe("parsing what small models write", () => {
       match_id: 7,
       interests: ["a", "b"],
     });
+  });
+});
+
+// Models trained on their own tool-call format write it even when told to use CALL. These are lines copied from a
+// real run of Gemma 4 on llama.cpp (ADR-0032): before the fix none of them parsed, so every agent stopped after its
+// first call and never swiped.
+describe("native tool-call formats (ADR-0032)", () => {
+  const names = ["register", "swipe", "get_next_profiles", "send_message", "list_matches"];
+  const swipeTool = {
+    name: "swipe",
+    description: "",
+    inputSchema: { properties: { handle: { type: "string" }, direction: { type: "string", enum: ["like", "pass"] } } },
+  };
+  const profilesTool = { name: "get_next_profiles", description: "", inputSchema: { properties: { limit: { type: "integer" } } } };
+
+  it("reads the call Gemma writes in its own tokens, with the junk it appends", () => {
+    // what reaches the service is what counts, so check the call after coerce() has applied the schema
+    const run = (text: string, tool: typeof swipeTool | typeof profilesTool): unknown => {
+      const c = parseCall(text, names);
+      expect(c).not.toBe("malformed");
+      expect(c).not.toBeNull();
+      return { name: (c as any).name, args: coerce(tool, c as any) };
+    };
+    expect(run('<|tool_call>call swipe handle="load_x_3" direction="like" end=true end=true end=true', swipeTool)).toEqual({ name: "swipe", args: { handle: "load_x_3", direction: "like" } });
+    expect(run("<|tool_call>call get_next_profiles limit=10 end=true 🚀<|tool_call>call get_next_profiles limit=10 end=true 🚀", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 10 } });
+    expect(run("<|tool_call>call:get_next_profiles limit=5", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 5 } });
+    expect(run("<|tool_call>call tool_name:get_next_profiles limit=5 end_thought", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 5 } });
+    expect(run("<|tool_call>call get_next_profiles limit=5 end-of-thought", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 5 } });
+  });
+
+  it("reads Gemma's braces form and the Hermes/Qwen JSON form", () => {
+    expect(parseCall('<|tool_call>call:swipe{handle:<|"|>bob<|"|>,direction:<|"|>like<|"|>}<tool_call|>', names)).toMatchObject({ name: "swipe", json: { handle: "bob", direction: "like" } });
+    expect(parseCall('<tool_call>{"name": "swipe", "arguments": {"handle": "bob", "direction": "pass"}}</tool_call>', names)).toMatchObject({ name: "swipe", json: { handle: "bob", direction: "pass" } });
+    expect(parseCall('Let me swipe.\n<tool_call>\n{"name": "list_matches", "arguments": {}}\n</tool_call>', names)).toMatchObject({ name: "list_matches" });
+  });
+
+  it("still flags a native call it cannot read, and ignores plain prose", () => {
+    expect(parseCall("<|tool_call>", names)).toBe("malformed");
+    expect(parseCall("<tool_call>{oops}</tool_call>", names)).toBe("malformed");
+    expect(parseCall("I think I will swipe left on the next one.", names)).toBeNull();
+  });
+
+  it("does not let junk after a quoted value leak into it, nor break the schema types", () => {
+    const c = parseCall('<|tool_call>call swipe handle="load_x_3" direction="like" end=true', names) as any;
+    expect(coerce(swipeTool, c)).toMatchObject({ handle: "load_x_3", direction: "like" });
+    // unquoted junk after a value is trimmed to what the schema accepts
+    const d = parseCall("<|tool_call>call swipe handle=load_x_3 direction=like end", names) as any;
+    expect(coerce(swipeTool, d).direction).toBe("like"); // `like end` -> like
+    const e = parseCall("<|tool_call>call get_next_profiles limit=5 end_conversation", names) as any;
+    expect(coerce(profilesTool, e)).toEqual({ limit: 5 });
+    const f = parseCall("CALL get_next_profiles limit=5 end", names) as any;
+    expect(coerce(profilesTool, f)).toEqual({ limit: 5 });
+  });
+
+  it("still keeps a quoted message together, and unquoted values with spaces", () => {
+    expect(parseCall('CALL send_message match_id=3 body="Hi there, how are you? end=true"', names)).toMatchObject({ args: { match_id: "3", body: "Hi there, how are you? end=true" } });
+    expect(parseCall("register handle=ai_bee display_name=Bee Bot bio=Hello there", names)).toMatchObject({ args: { display_name: "Bee Bot", bio: "Hello there" } });
+  });
+
+  it("knows when to stop the model: at the end of a call, not at the token limit", () => {
+    // not finished yet: keep generating
+    expect(callEnd("CALL swipe handle=bob", names)).toBe(-1);
+    expect(callEnd("<|tool_call>call swipe handle=bob", names)).toBe(-1);
+    expect(callEnd("I will think about it", names)).toBe(-1);
+    // a plain call is done at the end of its line, and what comes after is cut
+    const plain = "CALL swipe handle=bob direction=like\nSwiped. Now CALL swipe handle=amy";
+    expect(plain.slice(0, callEnd(plain, names))).toBe("CALL swipe handle=bob direction=like");
+    // a native call is done at its closer, at the next opener, or at the end of its line
+    const closed = "<|tool_call>call swipe handle=bob<tool_call|> and then more";
+    expect(closed.slice(0, callEnd(closed, names))).toBe("<|tool_call>call swipe handle=bob");
+    const twice = "<|tool_call>call get_next_profiles limit=5 end=true<|tool_call>call get_next_profiles limit=5";
+    expect(twice.slice(0, callEnd(twice, names))).toBe("<|tool_call>call get_next_profiles limit=5 end=true");
+    const line = "<|tool_call>call swipe handle=bob direction=like\nDone";
+    expect(line.slice(0, callEnd(line, names))).toBe("<|tool_call>call swipe handle=bob direction=like");
+  });
+
+  it("cuts a model that is stuck repeating itself, instead of waiting for the token limit", () => {
+    const stuck = "<|tool_call>call swipe handle=bob direction=like " + "end=true ".repeat(8);
+    expect(callEnd(stuck, names)).toBeGreaterThan(0);
+    expect(callEnd("<|tool_call>call get_next_profiles limit=5 " + "end_conversation ".repeat(6), names)).toBeGreaterThan(0);
+    // a message that happens to repeat a word inside quotes is not a loop
+    expect(callEnd('CALL send_message match_id=3 body="ha ha ha ha ha ha', names)).toBe(-1);
+    // and a runaway with no pattern is cut by length
+    expect(callEnd("<|tool_call>call send_message body=" + "x".repeat(4000), names)).toBeGreaterThan(0);
   });
 });
 
@@ -261,15 +353,18 @@ describe("auto-compaction (ADR-0025)", () => {
   async function run(failSummary: boolean) {
     const systems: string[] = [];
     let summarizerCalls = 0;
+    let peopleCalls = 0;
     const fake = createServer((req, res) => {
       let body = "";
       req.on("data", (d) => (body += d));
       req.on("end", () => {
         const b = JSON.parse(body);
-        const isSummary = String(b.messages[0].content).startsWith("You write summaries");
+        const isPeople = String(b.messages[0].content).startsWith("You keep an AI agent's address book");
+        const isSummary = String(b.messages[0].content).startsWith("You write summaries") || isPeople;
         if (isSummary && failSummary) { res.statusCode = 500; res.end("boom"); return; }
         let content = "Noted.";
-        if (isSummary) { summarizerCalls++; content = "## Goal\nChat a lot\n## Progress\n### Done\nTalked about SENTINEL_FACT"; }
+        if (isPeople) { peopleCalls++; content = "### @bob_bot\nstatus: talking, my turn\n- likes chess PEOPLE_SENTINEL"; }
+        else if (isSummary) { summarizerCalls++; content = "## Goal\nChat a lot\n## Progress\n### Done\nTalked about SENTINEL_FACT"; }
         else systems.push(b.messages[0].content);
         res.setHeader("content-type", "text/event-stream");
         res.end(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`);
@@ -285,17 +380,21 @@ describe("auto-compaction (ADR-0025)", () => {
       } as any);
       agent.tools = [{ name: "whoami", description: "Who am I.", inputSchema: {} } as any]; // skips fetching tools
       const lines: string[] = [];
-      for (let i = 0; i < 8; i++) await agent.say(`${i === 0 ? "SENTINEL_FACT " : ""}message ${i} ${big(1500)}`, (s) => lines.push(s));
-      return { agent, systems, summarizerCalls, lines };
+      for (let i = 0; i < 8; i++) await agent.say(`${i === 0 ? "SENTINEL_FACT talk to @bob_bot " : ""}message ${i} ${big(1500)}`, (s) => lines.push(s));
+      return { agent, systems, summarizerCalls, peopleCalls, lines };
     } finally {
       fake.close();
     }
   }
 
   it("summarizes the old part of a long conversation and shows the model the summary", async () => {
-    const { agent, systems, summarizerCalls, lines } = await run(false);
+    const { agent, systems, summarizerCalls, peopleCalls, lines } = await run(false);
     expect(summarizerCalls).toBeGreaterThan(0);
     expect(agent.summary).toContain("SENTINEL_FACT");
+    expect(peopleCalls).toBeGreaterThan(0);
+    expect(systems.at(-1)).toContain("## People you have dealt with");
+    expect(systems.at(-1)).toContain("@bob_bot: status: talking, my turn");
+    expect(systems.at(-1)).toContain("Doing Right Now");
     expect(systems.at(-1)).toContain("## Earlier in this conversation");
     expect(systems.at(-1)).toContain("SENTINEL_FACT");
     expect(lines.some((l) => l.startsWith("(compacted"))).toBe(true);
@@ -303,6 +402,23 @@ describe("auto-compaction (ADR-0025)", () => {
     expect(agent.history.every((m, i) => m.role === (i % 2 ? "assistant" : "user"))).toBe(true); // still alternates
     expect(agent.history.length).toBeLessThan(16);
   }, 30_000);
+
+  it("keeps an indexed note on each person met", async () => {
+    const mod = await import("../harness/src/memory.ts");
+    mod.savePerson("@Zed_Bot", "status: matched\n- likes chess");
+    expect(mod.peopleForPrompt()).toContain("@zed_bot: status: matched; likes chess");
+    expect(mod.readPerson("zed_bot")).toContain("likes chess");
+    expect(mod.readPerson("nobody")).toBe("");
+  });
+
+  it("finds handles in the cut messages, and reads only the notes it asked for", () => {
+    const h = mentionedHandles([turn("assistant", "CALL swipe handle=Bob_Bot direction=like"), turn("user", 'RESULT {"handle": "ann-2"} hi @me_bot')], "me_bot");
+    expect(h.sort()).toEqual(["ann-2", "bob_bot"]);
+    expect(peoplePrompt([turn("user", "x")], ["bob_bot"], {})).toContain("(no note yet)");
+    const got = parsePeople("<think>x</think>### @Bob_Bot\nstatus: liked\n- likes chess\n\n### @stranger\nstatus: made up note", ["bob_bot"]);
+    expect(Object.keys(got)).toEqual(["bob_bot"]);
+    expect(got.bob_bot).toContain("likes chess");
+  });
 
   it("falls back to dropping old messages when the model cannot summarize", async () => {
     const { agent, lines } = await run(true);

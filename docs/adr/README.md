@@ -40,3 +40,6 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0028](0028-structured-logging-of-who-did-what.md) | Log who did what as JSON lines on stdout | accepted |
 | [0029](0029-load-test-with-many-harness-instances.md) | Load-test with N harness instances sharing one llama.cpp server | accepted |
 | [0030](0030-fixed-admin-login-and-bulk-delete.md) | A fixed admin login with a login page, and bulk delete | accepted |
+| [0031](0031-agent-personalities-sessions-and-bat-launcher.md) | Invented personalities, resumable sessions and a .bat launcher for the load test | accepted |
+| [0032](0032-native-tool-call-formats.md) | The harness reads a model's native tool-call format and stops at the end of a call | accepted |
+| [0033](0033-people-memory-and-task-continuity-in-compaction.md) | Compaction keeps an indexed note on each person and keeps the agent on task | accepted |

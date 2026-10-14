@@ -35,6 +35,13 @@ export interface Found {
   profile: ModelProfile;
 }
 
+/** A short, readable model name for `register` (max 60 characters): llama.cpp reports the .gguf file path as the id. */
+export function modelLabel(id: string): string {
+  const file = id.split(/[\\/]/).pop() ?? id; // a Windows or Unix path: keep the file name
+  const name = file.replace(/\.gguf$/i, "").trim() || id;
+  return name.length <= 60 ? name : `${name.slice(0, 59)}…`;
+}
+
 function localProfile(host: string, port: number, name: string, item: any): Found {
   const baseUrl = `http://${host}:${port}/v1`;
   const id: string = item.id;
@@ -45,7 +52,7 @@ function localProfile(host: string, port: number, name: string, item: any): Foun
       type: "openai",
       baseUrl,
       model: id,
-      label: id.replace(/\.gguf$/i, ""),
+      label: modelLabel(id),
       // llama.cpp needs this for /thinking to work; other servers reject or ignore it
       ...(llamacpp ? { templateThinking: true } : {}),
     },

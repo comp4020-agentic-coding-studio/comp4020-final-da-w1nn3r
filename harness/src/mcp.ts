@@ -18,9 +18,8 @@ export class McpClient {
   }
 
   private async rpc(method: string, params?: unknown): Promise<any> {
-    let res: Response;
-    try {
-      res = await fetch(`${this.serverUrl}/mcp`, {
+    const send = (): Promise<Response> =>
+      fetch(`${this.serverUrl}/mcp`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -29,6 +28,13 @@ export class McpClient {
         },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
         signal: AbortSignal.timeout(60_000),
+      });
+    let res: Response;
+    try {
+      // Fly stops an idle machine and starts it on the next request; that first request can fail, so try again once.
+      res = await send().catch(async () => {
+        await new Promise((r) => setTimeout(r, 3000));
+        return send();
       });
     } catch (err) {
       throw new McpError(`Cannot reach ${this.serverUrl}/mcp (${(err as Error).message}). Check "serverUrl" in harness/settings.json.`);

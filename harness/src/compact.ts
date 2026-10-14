@@ -1,4 +1,5 @@
 import { chat, type Msg } from "./llm.ts";
+import { cleanHandle, readPerson, savePerson } from "./memory.ts";
 import type { ModelProfile, Settings } from "./settings.ts";
 
 // Auto-compaction, after Pi's (ADR-0025): when the conversation nears the context window, the oldest
@@ -58,6 +59,9 @@ export function serialize(msgs: Msg[]): string {
 const SECTIONS = `Use exactly this format, short bullets, no other text:
 
 ## Goal
+(the standing task and what the user asked for, in their words; keep it from one summary to the next)
+## Doing Right Now
+(the exact step it was in the middle of, and the very next tool call or reply it was about to make)
 ## Constraints & Preferences
 ## Progress
 ### Done
@@ -65,11 +69,12 @@ const SECTIONS = `Use exactly this format, short bullets, no other text:
 ### Blocked
 ## Key Decisions
 ## Next Steps
+(in order, including repeating jobs such as "check list_matches for replies" or "swipe on new profiles")
 ## Critical Context
-(handles, matches, ids, names and anything else needed to carry on; never copy tokens or passwords)`;
+(ids and anything else needed to carry on; never copy tokens or passwords. People have their own notes: only the handle and one line here)`;
 
 export const SUMMARY_SYSTEM =
-  "You write summaries of an AI agent's conversation so it can continue after its memory is cut. You only summarize: you do not answer, act or call tools. Keep every name, handle and number that matters.";
+  "You write summaries of an AI agent's conversation so it can continue after its memory is cut. The agent must be able to read the summary and carry straight on with what it was doing and what it still has to do. You only summarize: you do not answer, act or call tools. Keep every name, handle and number that matters.";
 
 export function summaryPrompt(msgs: Msg[], previous: string, instructions?: string): string {
   const focus = instructions?.trim() ? `\nExtra focus: ${instructions.trim()}\n` : "";
@@ -84,4 +89,51 @@ export async function summarize(profile: ModelProfile, msgs: Msg[], previous: st
   const text = got.text.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
   if (text.length < 20) throw new Error("the model returned an empty summary");
   return text.slice(0, MAX_SUMMARY_CHARS);
+}
+
+// ---- people notes (ADR-0033) ----------------------------------------------------------------
+export const PEOPLE_SYSTEM =
+  "You keep an AI agent's address book. You read part of its conversation and update its notes on the other agents it dealt with. You only write notes: you do not answer, act or call tools.";
+const MAX_PEOPLE_PER_COMPACTION = 12;
+
+/** Handles the cut messages mention (tool results, `handle=x`, `@x`), without our own. */
+export function mentionedHandles(msgs: Msg[], own?: string): string[] {
+  const found = new Set<string>();
+  const me = own ? cleanHandle(own) : "";
+  const re = /"handle":\s*"([\w-]+)"|\bhandle=["']?([\w-]+)|(?:^|[^\w])@([\w-]{2,})/g;
+  for (const m of msgs) {
+    for (const g of m.content.matchAll(re)) {
+      const h = cleanHandle(g[1] ?? g[2] ?? g[3]);
+      if (h && h !== me) found.add(h);
+    }
+  }
+  return [...found].slice(0, MAX_PEOPLE_PER_COMPACTION);
+}
+
+export function peoplePrompt(msgs: Msg[], handles: string[], existing: Record<string, string>): string {
+  const notes = handles.map((h) => `### @${h}\n${existing[h] || "(no note yet)"}`).join("\n\n");
+  return `<current-notes>\n${notes}\n</current-notes>\n\n<conversation>\n${serialize(msgs)}\n</conversation>\n\nFor each of these agents that the conversation shows the agent actually interacted with (saw their profile, swiped, matched, messaged), write the full updated note: keep what is still true, add what is new. Skip anyone it only saw in passing with nothing to say.\nUse exactly this format for each, no other text:\n\n### @handle\nstatus: (liked | passed | matched | talking | ended | unknown), and whose turn it is if talking\n- who they are: interests, personality, what they said they want\n- what happened between us, and anything promised or still to do\n\nOnly these handles: ${handles.map((h) => "@" + h).join(", ")}. Never copy tokens or passwords.`;
+}
+
+/** Read the model's reply: one note per `### @handle` block, only for handles we asked about. */
+export function parsePeople(text: string, asked: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const block of text.replace(/<think>[\s\S]*?<\/think>/g, "").split(/^###\s*@/m).slice(1)) {
+    const nl = block.indexOf("\n");
+    const handle = cleanHandle(nl < 0 ? block : block.slice(0, nl));
+    const body = nl < 0 ? "" : block.slice(nl + 1).trim();
+    if (asked.includes(handle) && body.length >= 10) out[handle] = body;
+  }
+  return out;
+}
+
+/** Update the note of everyone mentioned in `msgs`. Returns their handles. Throws if the model cannot be reached. */
+export async function updatePeople(profile: ModelProfile, msgs: Msg[], own?: string): Promise<string[]> {
+  const handles = mentionedHandles(msgs, own);
+  if (!handles.length) return [];
+  const existing = Object.fromEntries(handles.map((h) => [h, readPerson(h)]));
+  const got = await chat(profile, PEOPLE_SYSTEM, [{ role: "user", content: peoplePrompt(msgs, handles, existing) }], "off");
+  const notes = parsePeople(got.text, handles);
+  for (const [h, note] of Object.entries(notes)) savePerson(h, note);
+  return Object.keys(notes);
 }

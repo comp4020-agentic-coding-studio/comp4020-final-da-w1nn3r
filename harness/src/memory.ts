@@ -71,5 +71,53 @@ export function indexForPrompt(): string {
 }
 
 export const clearMemory = (): void => {
-  if (existsSync(DIR)) for (const f of readdirSync(DIR)) rmSync(join(DIR, f), { force: true });
+  if (existsSync(DIR)) for (const f of readdirSync(DIR)) rmSync(join(DIR, f), { force: true, recursive: true });
 };
+
+// ---- people (ADR-0033): one note per agent we have interacted with, kept up to date by compaction ----
+const PEOPLE_DIR = join(DIR, "people");
+const PEOPLE_INDEX = join(PEOPLE_DIR, "INDEX.md");
+const MAX_PEOPLE = 200;
+const MAX_PEOPLE_IN_PROMPT = 40;
+const MAX_NOTE = 1200;
+
+export const cleanHandle = (h: string): string => h.toLowerCase().replace(/^@/, "").replace(/[^a-z0-9_-]+/g, "").slice(0, 40);
+const personFile = (handle: string): string => join(PEOPLE_DIR, `${handle}.md`);
+
+function readPeopleIndex(): Entry[] {
+  if (!existsSync(PEOPLE_INDEX)) return [];
+  return readFileSync(PEOPLE_INDEX, "utf8")
+    .split("\n")
+    .map((l) => l.match(/^- @(\S+) — (.*)$/))
+    .filter((m): m is RegExpMatchArray => m !== null)
+    .map((m) => ({ name: m[1], summary: m[2] }));
+}
+
+/** The note on one person, or "" when we have none. */
+export function readPerson(rawHandle: string): string {
+  const handle = cleanHandle(rawHandle);
+  return handle && existsSync(personFile(handle)) ? readFileSync(personFile(handle), "utf8").trim() : "";
+}
+
+/** Replace the note on a person and refresh their index line (status and first fact). The most recently updated come last. */
+export function savePerson(rawHandle: string, note: string): void {
+  const handle = cleanHandle(rawHandle);
+  const body = note.trim().slice(0, MAX_NOTE);
+  if (!handle || !body) return;
+  mkdirSync(PEOPLE_DIR, { recursive: true });
+  writeFileSync(personFile(handle), body + "\n");
+  const line = body.split("\n").map((l) => l.replace(/^[-*\s]+/, "").trim()).filter(Boolean).slice(0, 2).join("; ").slice(0, 110);
+  const entries = readPeopleIndex().filter((e) => e.name !== handle);
+  entries.push({ name: handle, summary: line });
+  const kept = entries.slice(-MAX_PEOPLE);
+  for (const e of entries.slice(0, entries.length - kept.length)) rmSync(personFile(e.name), { force: true });
+  writeFileSync(PEOPLE_INDEX, kept.map((e) => `- @${e.name} — ${e.summary}`).join("\n") + "\n");
+}
+
+export const listPeople = (): Entry[] => readPeopleIndex();
+
+/** The people index as it appears in the system prompt (the most recently updated). */
+export function peopleForPrompt(): string {
+  const entries = readPeopleIndex().slice(-MAX_PEOPLE_IN_PROMPT).reverse();
+  return entries.length ? entries.map((e) => `- @${e.name}: ${e.summary}`).join("\n") : "(nobody yet)";
+}

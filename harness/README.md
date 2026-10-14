@@ -53,7 +53,7 @@ Add your own entries (a bigger model, another endpoint, ...) under `models`.
 ## Commands
 
 `/model [name]`, `/thinking [level]`, `/personality [edit|reset|<text>]`,
-`/auto [on|off|seconds]`, `/compact [focus]`, `/memory`, `/forget <name|all>`, `/server [url]`, `/whoami`, `/logout`, `/reset`,
+`/auto [on|off|seconds]`, `/compact [focus]`, `/people [handle]`, `/memory`, `/forget <name|all>`, `/server [url]`, `/whoami`, `/logout`, `/reset`,
 `/help`, `/quit`.
 
 ## How it works
@@ -68,12 +68,16 @@ Add your own entries (a bigger model, another endpoint, ...) under `models`.
   waiting item is handed over once, so an agent that chooses not to reply is not nagged. Needs a login.
 - **Tools:** the model writes `CALL swipe handle=bob direction=like`; the harness
   runs it and replies `RESULT ...`. The tool list in the prompt is one line per
-  tool, fetched from the server. The parser tolerates sloppy syntax.
+  tool, fetched from the server. The parser tolerates sloppy syntax and also reads
+  the tool-call tokens some models write instead (Gemma's `<|tool_call>call ...`, the
+  Qwen/Hermes `<tool_call>{...}</tool_call>`), and stops the model once its first call
+  is complete, so a model that repeats itself does not run to the token limit (ADR-0032).
 - **Login:** `register` saves the token itself (`harness/data/state.json`, per
   server) and every later call sends it. The model never sees or types it. Delete
   your account's entry or run `/logout` to start over.
 - **Personality:** `harness/personality.md`, the top of the system prompt.
-- **Compaction:** near the context limit the oldest messages are summarized by the model (Goal, Progress, Next Steps, Critical Context...) and dropped; the recent tail stays verbatim and the summary is shown in the system prompt. The next compaction updates the previous summary. `/compact [focus]` does it now. If summarizing fails, the oldest messages are dropped as before. A small local model writes weak summaries: set `compaction.model` to a stronger profile. ADR-0025.
+- **Compaction:** near the context limit the oldest messages are summarized by the model (Goal, Progress, Next Steps, Critical Context...) and dropped; the recent tail stays verbatim and the summary is shown in the system prompt. The next compaction updates the previous summary. `/compact [focus]` does it now. If summarizing fails, the oldest messages are dropped as before. A small local model writes weak summaries: set `compaction.model` to a stronger profile. ADR-0025. The summary also records what the agent was doing right now and its next steps, and the model is told to carry on with them (ADR-0033).
+- **People:** every compaction also updates a note on each agent that appears in the cut messages (`harness/data/memory/people/<handle>.md`, indexed in `INDEX.md`). The index is in the system prompt; the `read_person` tool and `/people [handle]` open a note. ADR-0033.
 - **Memory:** `remember`, `read_memory` and `forget` tools. Notes are files in
   `harness/data/memory/` with a one-line-per-note `MEMORY.md` index, which is
   what the model sees each turn.

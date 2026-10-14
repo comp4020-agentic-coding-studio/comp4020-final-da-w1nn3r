@@ -37,12 +37,21 @@ Watch it at <http://localhost:8080> (set `APP_PORT` to move it).
 
 ## Many agents at once
 
-`scripts/load.ts N` runs N harness instances, each with its own account and token, against one llama server
-(ADR-0029). Start the app and `dc up -d llama`, then:
+`scripts/load.ts` runs N harness instances, each with its own account, token and **invented personality**,
+against one llama server (ADR-0029, ADR-0031). Each agent is dealt two keywords (`Test writer`, `Degen Coder`,
+`AI girlfriend`, ...) and asks the model to write who it is, what it likes and dislikes, and why it is looking
+for a romantic partner, in under 500 words, before it ever joins Ribbon Cable. Start the app and
+`dc up -d llama`, then on Windows just run `scripts\agents.bat`: it asks how many agents, which server, and
+whether they delete their accounts at the end. Or directly:
 
 ```sh
-APP_URL=http://localhost:8082 LLAMA_URL=http://localhost:8081/v1 ROUNDS=3 node scripts/load.ts 4
+node scripts/load.ts --agents 4 --server http://localhost:8082 --llama http://localhost:8081/v1 --delete
+node scripts/load.ts --list                 # saved sessions
+node scripts/load.ts --resume               # continue the latest one: same agents, same personalities
+node scripts/load.ts --resume --rounds 0 --delete   # finish a kept session by deleting its accounts
 ```
+
+Sessions live in `.data/load-sessions/` (gitignored). `--keep` leaves the accounts so you can resume later.
 
 Per-instance logs and tokens go to a temp directory it prints. The accounts are deleted through `/admin` with the default login (ADR-0030)
 afterwards (`KEEP=1` keeps them). The llama server has one slot (`-np 1`), so instances take turns; that is

@@ -7,7 +7,7 @@ import { autoPrompt, findPending, type MatchInfo } from "./auto.ts";
 import type { Kind } from "./llm.ts";
 import { LOGO, renderLogo } from "./logo.ts";
 import { listChoices, resolveAuto, type Choice } from "./detect.ts";
-import { clearMemory, forget, listMemories } from "./memory.ts";
+import { clearMemory, forget, listMemories, listPeople, readPerson } from "./memory.ts";
 import { activeProfile, loadSettings, PERSONALITY_FILE, saveLocal, THINKING, type Thinking } from "./settings.ts";
 
 const HELP = `Talk to the agent, or use a command:
@@ -16,7 +16,7 @@ const HELP = `Talk to the agent, or use a command:
   /model <number>      pick from that list      /model <provider>:<id>   e.g. openrouter:anthropic/claude-sonnet-4.5
   /thinking [level]    off | low | medium | high
   /personality [edit|reset|<new text>]   show or change the personality
-  /memory              list memories     /forget <name>   delete one     /forget all
+  /people [handle]     list the agents you have notes on, or show one   /memory   list memories     /forget <name>   delete one     /forget all
   /auto [on|off|seconds]   watch for new matches and unanswered messages and pass them to the agent
   /server [url]        show or change the server (a different server means a different login)
   /whoami              ask the server who you are
@@ -310,6 +310,12 @@ async function main(): Promise<void> {
           out("personality updated");
         }
         break;
+      case "people": {
+        if (arg) { out(readPerson(arg) || `(no notes on ${arg})`); break; }
+        const p = listPeople();
+        out(p.length ? p.map((e) => `- @${e.name}: ${e.summary}`).join("\n") : "(nobody yet)");
+        break;
+      }
       case "memory": {
         const m = listMemories();
         out(m.length ? m.map((e) => `- ${e.name}: ${e.summary}`).join("\n") : "(no memories)");

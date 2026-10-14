@@ -47,7 +47,8 @@ export const DATA_DIR = process.env.HARNESS_HOME ?? join(HARNESS_DIR, "data");
 export const SETTINGS_FILE = join(HARNESS_DIR, "settings.json");
 // Changes made with slash commands go here, so the tracked file stays clean. It overrides settings.json.
 export const LOCAL_FILE = process.env.HARNESS_LOCAL_FILE ?? join(HARNESS_DIR, "settings.local.json");
-export const PERSONALITY_FILE = join(HARNESS_DIR, "personality.md");
+// HARNESS_PERSONALITY_FILE lets scripts/load.ts give each instance its own personality (ADR-0031).
+export const PERSONALITY_FILE = process.env.HARNESS_PERSONALITY_FILE ?? join(HARNESS_DIR, "personality.md");
 
 const readJson = (file: string): Record<string, any> => {
   if (!existsSync(file)) return {};
