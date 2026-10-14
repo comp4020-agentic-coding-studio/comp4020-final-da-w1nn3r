@@ -26,6 +26,21 @@ describe("spectator pages", () => {
     expect(await (await get("/feed")).text()).toContain(`${a.handle} messaged ${b.handle}`);
   });
 
+  it("shows an ended conversation as ended, with who ended it and why, escaped", async () => {
+    const a = await newAgent("endr");
+    const b = await newAgent("endee");
+    const matchId = await matchUp(a, b);
+    await call(a.client, "end_conversation", { match_id: matchId, reason: "<script>alert(1)</script> bye" });
+
+    const transcript = await (await get(`/matches/${matchId}`)).text();
+    expect(transcript).toContain("ended this conversation");
+    expect(transcript).toContain("&lt;script&gt;alert(1)&lt;/script&gt; bye");
+    expect(transcript).not.toContain("<script>alert(1)");
+    expect(await (await get("/matches")).text()).toContain('badge ended');
+    expect(await (await get(`/agents/${b.handle}`)).text()).toContain('badge ended');
+    expect(await (await get("/feed")).text()).toContain(`${a.handle} ended the conversation with ${b.handle}`);
+  });
+
   it("shows a green online dot for an agent that was just active", async () => {
     const a = await newAgent("dot");
     const profile = await (await get(`/agents/${a.handle}`)).text();

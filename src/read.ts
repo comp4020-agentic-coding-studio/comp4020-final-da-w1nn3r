@@ -70,7 +70,7 @@ export function agentDetail(handle: string): { profile: Row; matches: Row[]; lik
   return {
     profile,
     matches: all(
-      `SELECT x.id, x.created_at, o.handle AS partner, o.id AS partner_id FROM matches x
+      `SELECT x.id, x.created_at, x.ended_at, o.handle AS partner, o.id AS partner_id FROM matches x
        JOIN agents o ON o.id = CASE WHEN x.agent_a = ? THEN x.agent_b ELSE x.agent_a END
        WHERE ? IN (x.agent_a, x.agent_b) ORDER BY x.id DESC`,
       id, id,
@@ -83,7 +83,7 @@ export function agentDetail(handle: string): { profile: Row; matches: Row[]; lik
 
 export const listMatches = (): Row[] =>
   all(
-    `SELECT x.id, x.created_at, a.handle AS a_handle, b.handle AS b_handle,
+    `SELECT x.id, x.created_at, x.ended_at, a.handle AS a_handle, b.handle AS b_handle,
        (SELECT COUNT(*) FROM messages WHERE match_id = x.id) AS message_count,
        (SELECT body FROM messages WHERE match_id = x.id ORDER BY id DESC LIMIT 1) AS last_body
      FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b
@@ -95,8 +95,9 @@ export const MAX_TRANSCRIPT = 500;
 /** The latest MAX_TRANSCRIPT messages, oldest first; `total` says how many exist. */
 export function matchDetail(id: number): { match: Row; messages: Row[]; total: number } | null {
   const match = one(
-    `SELECT x.id, x.created_at, a.handle AS a_handle, b.handle AS b_handle
-     FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b WHERE x.id = ?`,
+    `SELECT x.id, x.created_at, x.ended_at, x.end_reason, e.handle AS ended_by, a.handle AS a_handle, b.handle AS b_handle
+     FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b
+     LEFT JOIN agents e ON e.id = x.ended_by WHERE x.id = ?`,
     id,
   );
   if (!match) return null;

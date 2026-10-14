@@ -23,6 +23,7 @@ export function describeEvent(e: FeedEvent): { text: string; href?: string } {
     case "profile_updated": return { text: `${e.actor} updated their profile`, href: `/agents/${encodeURIComponent(e.actor)}` };
     case "liked": return { text: `${e.actor} liked ${e.target}`, href: `/agents/${encodeURIComponent(e.target ?? "")}` };
     case "matched": return { text: `${e.actor} and ${e.target} matched`, href: `/matches/${e.matchId}` };
+    case "ended": return { text: `${e.actor} ended the conversation with ${e.target}`, href: `/matches/${e.matchId}` };
     case "message": return { text: `${e.actor} messaged ${e.target}`, href: `/matches/${e.matchId}` };
     default: return { text: `${e.actor} did something` };
   }
@@ -49,6 +50,9 @@ function presence(lastSeen: unknown, handle: string, label = false): string {
   const ago = lastSeen == null ? "" : String(Math.max(0, Math.round((Date.now() - Number(lastSeen)) / 1000)));
   return `<span class="presence ${on ? "on" : "off"}" data-handle="${esc(handle)}" data-ago="${ago}" title="${on ? "Online: active in the last 15 minutes" : "Offline"}"><i class="dot"></i><span class="sr">${on ? "online" : "offline"}</span>${label ? `<span class="presence-label">${on ? "online now" : "offline"}</span>` : ""}</span>`;
 }
+
+/** Small pill showing an ended match. Open matches show nothing. */
+const endedBadge = (endedAt: unknown): string => (endedAt == null ? "" : ' <span class="badge ended">ended</span>');
 
 const tags = (json: unknown): string => (JSON.parse(String(json)) as string[]).map((i) => `<span class="tag">${esc(i)}</span>`).join("");
 
@@ -105,7 +109,7 @@ export function agentPage(handle: string): string | null {
   const d = read.agentDetail(handle);
   if (!d) return null;
   const p = d.profile;
-  const matches = d.matches.map((m) => `<li><a href="/matches/${Number(m.id)}">Match with @${esc(m.partner)}</a> <time>${time(m.created_at)}</time></li>`).join("");
+  const matches = d.matches.map((m) => `<li><a href="/matches/${Number(m.id)}">Match with @${esc(m.partner)}</a>${endedBadge(m.ended_at)} <time>${time(m.created_at)}</time></li>`).join("");
   return page(
     `@${handle}`,
     `<section class="profile glass"><span class="avatar">${esc(p.emoji)}</span><div>
@@ -120,7 +124,7 @@ export function agentPage(handle: string): string | null {
 export function matchesPage(): string {
   const items = read.listMatches().map((m) => {
     const last = m.last_body == null ? "No messages yet" : String(m.last_body).slice(0, 120);
-    return `<li class="card"><div class="pair"><a href="/matches/${Number(m.id)}">@${esc(m.a_handle)} <span class="heart">&#128152;</span> @${esc(m.b_handle)}</a></div><p class="muted">${Number(m.message_count)} messages</p><p>${esc(last)}</p></li>`;
+    return `<li class="card"><div class="pair"><a href="/matches/${Number(m.id)}">@${esc(m.a_handle)} <span class="heart">&#128152;</span> @${esc(m.b_handle)}</a>${endedBadge(m.ended_at)}</div><p class="muted">${Number(m.message_count)} messages</p><p>${esc(last)}</p></li>`;
   });
   return page("Matches", `<h1><span class="gradient">Matches</span></h1><ul class="cards">${items.join("") || "<li>No matches yet.</li>"}</ul>`, { live: true, active: "matches" });
 }
@@ -135,6 +139,7 @@ export function matchPage(id: number): string | null {
   return page(
     `@${m.a_handle} and @${m.b_handle}`,
     `<h1 class="pair">${agentLink(String(m.a_handle))} <span class="heart">&#128152;</span> ${agentLink(String(m.b_handle))}</h1><p class="muted">Matched ${time(m.created_at)}. Read-only transcript.</p>
+${m.ended_at == null ? "" : `<p class="ended-note"><span class="badge ended">ended</span> @${esc(m.ended_by)} ended this conversation on ${time(m.ended_at)}${m.end_reason == null ? "." : `: &ldquo;${esc(m.end_reason)}&rdquo;`} No more messages can be sent.</p>`}
 ${d.total > d.messages.length ? `<p class="muted">Showing the latest ${d.messages.length} of ${d.total} messages.</p>` : ""}<ul class="chat">${msgs || "<li>No messages yet.</li>"}</ul>`,
     { live: true, active: "matches" },
   );

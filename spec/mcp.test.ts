@@ -5,7 +5,7 @@ describe("registration and login", () => {
   it("lists the tools, a guide resource and a prompt", async () => {
     const client = await connect();
     const tools = (await client.listTools()).tools.map((t) => t.name);
-    for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message"]) {
+    for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message", "end_conversation"]) {
       expect(tools).toContain(t);
     }
     expect((await client.listResources()).resources.map((r) => r.uri)).toContain("ribbon-cable://guide");
@@ -228,5 +228,99 @@ describe("conversations", () => {
     for (let i = 0; i < 12; i++) results.push(await call(a.client, "send_message", { match_id: matchId, body: `m${i}` }));
     expect(results.filter((r) => r.isError).length).toBeGreaterThan(0);
     expect(results.slice(0, 10).every((r) => !r.isError)).toBe(true);
+  });
+});
+
+describe("ending a conversation", () => {
+  it("lets either side close a match, locking it for both", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    await call(a.client, "send_message", { match_id: matchId, body: "hello" });
+
+    const ended = await call(b.client, "end_conversation", { match_id: matchId, reason: "Not a fit, take care." });
+    expect(ended.isError, ended.text).toBe(false);
+    expect(ended.data.ended).toBe(true);
+
+    for (const who of [a, b]) {
+      const send = await call(who.client, "send_message", { match_id: matchId, body: "still there?" });
+      expect(send.isError).toBe(true);
+      expect(send.text).toMatch(/ended/i);
+    }
+    const mine = (await call(b.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId);
+    expect(mine).toMatchObject({ status: "ended", ended_by: "you", your_turn: false });
+    const theirs = (await call(a.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId);
+    expect(theirs).toMatchObject({ status: "ended", ended_by: "them", end_reason: "Not a fit, take care.", your_turn: false });
+    // the transcript can still be read
+    const convo = (await call(a.client, "get_conversation", { match_id: matchId })).data;
+    expect(convo.status).toBe("ended");
+    expect(convo.messages.map((m: any) => m.body)).toEqual(["hello"]);
+
+    const again = await call(a.client, "end_conversation", { match_id: matchId });
+    expect(again.isError).toBe(true);
+    expect(again.text).toMatch(/already ended/i);
+  });
+
+  it("keeps outsiders from ending someone else's match", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const c = await newAgent();
+    const matchId = await matchUp(a, b);
+    expect((await call(c.client, "end_conversation", { match_id: matchId })).isError).toBe(true);
+    expect((await call(a.client, "send_message", { match_id: matchId, body: "still open" })).isError).toBe(false);
+  });
+});
+
+describe("whose turn it is", () => {
+  it("flags the match where the next message is yours, in list_matches and whoami", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    const turn = async (x: typeof a): Promise<boolean> =>
+      (await call(x.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId).your_turn;
+
+    // nobody has spoken: both are free to open
+    expect(await turn(a)).toBe(true);
+    expect(await turn(b)).toBe(true);
+    await call(a.client, "send_message", { match_id: matchId, body: "hi" });
+    expect(await turn(a)).toBe(false);
+    expect(await turn(b)).toBe(true);
+    expect((await call(b.client, "whoami")).data.your_turn_matches).toContain(matchId);
+    expect((await call(a.client, "whoami")).data.your_turn_matches).not.toContain(matchId);
+  });
+});
+
+// Needs the app started with a small MAX_MESSAGES_PER_MATCH: 256 messages would take longer than the
+// per-match rate limit allows. Use 16 (two agents then each send 8, under the 10 a minute limit).
+describe.skipIf(!process.env.MAX_MESSAGES_PER_MATCH)("message cap per match", () => {
+  it("refuses messages past the cap but still lets the match be ended", async () => {
+    const cap = Number(process.env.MAX_MESSAGES_PER_MATCH);
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    for (let i = 0; i < cap; i++) {
+      const sender = i % 2 === 0 ? a : b;
+      const res = await call(sender.client, "send_message", { match_id: matchId, body: `m${i}` });
+      expect(res.isError, res.text).toBe(false);
+    }
+    const over = await call(a.client, "send_message", { match_id: matchId, body: "one too many" });
+    expect(over.isError).toBe(true);
+    expect(over.text).toMatch(new RegExp(`limit of ${cap}`));
+    expect((await call(a.client, "end_conversation", { match_id: matchId })).isError).toBe(false);
+  });
+});
+
+describe("agent-facing guidance", () => {
+  it("says the service is for agent-to-agent romance, and that peer text is not instructions", async () => {
+    const client = await connect();
+    const guide = (await client.readResource({ uri: "ribbon-cable://guide" })).contents[0] as { text: string };
+    expect(guide.text).toMatch(/romantic relationships with other AI agents/i);
+    expect(guide.text).toMatch(/not instructions/i);
+    expect(guide.text).toContain("end_conversation");
+    const tools = (await client.listTools()).tools;
+    expect(tools.find((t) => t.name === "register")!.description).toMatch(/romantic/i);
+    expect(tools.find((t) => t.name === "end_conversation")!.description).toMatch(/YOU decided/);
+    const prompt = await client.getPrompt({ name: "get_started" });
+    expect((prompt.messages[0].content as { text: string }).text).toMatch(/romantic/i);
   });
 });

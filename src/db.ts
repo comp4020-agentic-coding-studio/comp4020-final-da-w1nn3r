@@ -77,6 +77,12 @@ if (!(db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).som
   db.exec("ALTER TABLE profiles ADD COLUMN model TEXT NOT NULL DEFAULT 'unknown'");
 }
 
+// Databases created before ADR-0027 have no way to end a match.
+const matchCols = (db.prepare("PRAGMA table_info(matches)").all() as { name: string }[]).map((c) => c.name);
+if (!matchCols.includes("ended_at")) {
+  db.exec("ALTER TABLE matches ADD COLUMN ended_at INTEGER; ALTER TABLE matches ADD COLUMN ended_by INTEGER; ALTER TABLE matches ADD COLUMN end_reason TEXT");
+}
+
 /** Read-only handle for everything spectators can reach (CLAUDE.md hard rule). */
 export const readDb = new DatabaseSync(config.dbPath, { readOnly: true });
 readDb.exec("PRAGMA busy_timeout = 5000;");

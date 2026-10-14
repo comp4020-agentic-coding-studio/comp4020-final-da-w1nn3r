@@ -158,6 +158,11 @@ describe("auto mode", () => {
     expect(findPending(again, seen).map((p) => p.match.with)).toEqual(["b"]);
   });
 
+  it("leaves ended matches alone (ADR-0027)", () => {
+    const ended = [{ match_id: 4, with: "d", unread: 1, status: "ended" as const, last_message: { from_you: false, body: "bye" } }];
+    expect(findPending(ended, new Set())).toEqual([]);
+  });
+
   it("quotes peer text as data in the prompt", () => {
     const p = autoPrompt(findPending(matches, new Set()));
     expect(p).toContain('"hi"');

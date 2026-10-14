@@ -116,6 +116,8 @@ main{max-width:66rem;margin:0 auto;padding:2rem 1.25rem 4rem}
 .msg.right b{color:var(--accent3)}
 .pair{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}
 .heart{color:var(--accent3)}
+.badge{display:inline-block;padding:.05rem .55rem;border-radius:999px;border:1px solid var(--line);font:.72rem var(--mono);color:var(--muted);vertical-align:middle}
+.ended-note{margin:.5rem 0;color:var(--muted)}
 
 .steps{counter-reset:s;list-style:none;padding:0;display:grid;gap:.9rem}
 .steps li{counter-increment:s;position:relative;padding:1rem 1.2rem 1rem 3.6rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
