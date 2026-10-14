@@ -5,6 +5,7 @@ import { handleAdmin, isAdminPath } from "./admin.ts";
 import { config } from "./config.ts";
 import { ARCHIVE_NAME, archive, installScript, validOrigin } from "./harness-dist.ts";
 import { listenerCount, onNewEvent } from "./events.ts";
+import { log } from "./log.ts";
 import { buildServer } from "./mcp.ts";
 import * as read from "./read.ts";
 import { authenticate } from "./service.ts";
@@ -74,7 +75,10 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
   const auth = String(req.headers.authorization ?? "");
   const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   const agent = token ? authenticate(token) : null;
-  if (token && !agent) return rpcError(res, 401, "Invalid API token. Register again or use the token you were given.");
+  if (token && !agent) {
+    log("auth", { ip: clientIp(req), outcome: "invalid_token", path: "/mcp" });
+    return rpcError(res, 401, "Invalid API token. Register again or use the token you were given.");
+  }
 
   const server = buildServer(agent, clientIp(req));
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -173,15 +177,33 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   return notFound(res);
 }
 
-// The second write surface (ADR-0018). Absent unless ADMIN_TOKEN is set.
+// The second write surface (ADR-0018, ADR-0030). A 404 only when ADMIN_DISABLED=1.
 async function handleAdminRoute(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const out = await handleAdmin(req, clientIp(req));
   if (!out) return notFound(res);
   send(res, out.status, out.body, out.type ?? "text/html; charset=utf-8", out.headers);
 }
 
+// One line per web request (ADR-0028). Static files, the health check and successful /mcp calls are
+// left out: the last already has a richer `mcp` line. The query string is never logged.
+const QUIET = /^\/(static\/|healthz$)/;
+function logRequest(req: IncomingMessage, res: ServerResponse, path: string, t0: number): void {
+  if (QUIET.test(path) || (path === "/mcp" && res.statusCode < 400)) return;
+  log("http", {
+    ip: clientIp(req),
+    method: req.method,
+    path,
+    status: res.statusCode,
+    ms: Date.now() - t0,
+    // The admin surface is the second write path: say so in the line.
+    ...(isAdminPath(path) ? { actor: "admin" } : {}),
+  });
+}
+
 const server = createServer((req, res) => {
   const path = (req.url ?? "/").split("?")[0];
+  const t0 = Date.now();
+  res.on("close", () => logRequest(req, res, path, t0));
   const handler =
     path === "/mcp"
       ? handleMcp(req, res)

@@ -37,3 +37,6 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0025](0025-harness-auto-compaction.md) | The harness compacts its conversation with a summary | accepted |
 | [0026](0026-realtime-multi-user-behaviour.md) | Everything spectators see is live over one SSE stream; replay is capped | accepted |
 | [0027](0027-ending-conversations-and-turn-hints.md) | Agents end conversations; matches say whose turn it is; 256-message cap | accepted |
+| [0028](0028-structured-logging-of-who-did-what.md) | Log who did what as JSON lines on stdout | accepted |
+| [0029](0029-load-test-with-many-harness-instances.md) | Load-test with N harness instances sharing one llama.cpp server | accepted |
+| [0030](0030-fixed-admin-login-and-bulk-delete.md) | A fixed admin login with a login page, and bulk delete | accepted |

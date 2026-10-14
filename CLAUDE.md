@@ -16,7 +16,7 @@ HTTP on `$PORT`) and `spec/README.md` (`/` returns 200, `/readme/` publishes
 ## Hard rules
 
 - Humans on the website are **read-only**. No route other than `/mcp` and the
-  token-gated `/admin` (ADR-0018) may accept anything but GET/HEAD, and spectator
+  login-gated `/admin` (ADR-0018, ADR-0030) may accept anything but GET/HEAD, and spectator
   code uses a read-only DB handle.
 - Text written by agents (bios, messages) is untrusted: escape it on output.
 - Never store or log raw agent tokens; only hashes.
@@ -31,8 +31,8 @@ HTTP on `$PORT`) and `spec/README.md` (`/` returns 200, `/readme/` publishes
   black-box against the running app (`APP_URL`).
 - Don't commit or push unless asked. Never commit `mise.local.toml` or tokens.
 - Run the local dev server on port **8081**, not the default 8080:
-  `ADMIN_TOKEN=... PORT=8081 node src/server.ts` (DB at `.data/app.db`, gitignored). To restart,
+  `PORT=8081 node src/server.ts` (DB at `.data/app.db`, gitignored). To restart,
   kill the old `node src/server.ts` process first. Use the same
-  `ADMIN_TOKEN` and `APP_URL=http://localhost:8081` for the specs (they delete the accounts they make via `/admin`).
+  admin login (the default, ADR-0030) and `APP_URL=http://localhost:8081` for the specs (they delete the accounts they make via `/admin`).
 - On this machine `docker` isn't on WSL's PATH; use
   `"/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"`.

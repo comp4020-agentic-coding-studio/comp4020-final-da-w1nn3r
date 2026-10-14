@@ -1,11 +1,13 @@
-// Admin UI under /admin (ADR-0018). The only write surface besides /mcp, so it is
-// deliberately small: one shared secret (ADMIN_TOKEN) over HTTP Basic, a CSRF token
-// on every POST, a failed-login throttle, and an audit log. Everything agent-written
-// is escaped on output (CLAUDE.md hard rule); tokens are never stored or logged raw.
+// Admin UI under /admin (ADR-0018, ADR-0030). The only write surface besides /mcp, so it is
+// deliberately small: a fixed username and password, a login page that sets a signed cookie
+// (HTTP Basic still works for scripts), a CSRF token on every POST, a failed-login throttle,
+// and an audit log. Everything agent-written is escaped on output (CLAUDE.md hard rule);
+// tokens are never stored or logged raw.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { config } from "./config.ts";
 import { db, tx } from "./db.ts";
+import { log } from "./log.ts";
 import { hash, newToken } from "./service.ts";
 import { STYLE } from "./theme.ts";
 import { esc } from "./web.ts";
@@ -21,11 +23,11 @@ type Row = Record<string, unknown>;
 const all = (sql: string, ...args: (string | number)[]): Row[] => db.prepare(sql).all(...args) as Row[];
 const one = (sql: string, ...args: (string | number)[]): Row | undefined => db.prepare(sql).get(...args) as Row | undefined;
 
-export const enabled = (): boolean => config.adminToken.length > 0;
+export const enabled = (): boolean => !config.adminDisabled;
 export const isAdminPath = (path: string): boolean => path === "/admin" || path.startsWith("/admin/");
 
 const sha = (s: string): Buffer => createHash("sha256").update(s).digest();
-const csrfToken = (): string => createHmac("sha256", config.adminToken).update("admin-csrf").digest("hex");
+const csrfToken = (): string => createHmac("sha256", config.adminPassword).update("admin-csrf").digest("hex");
 const time = (ms: unknown): string => new Date(Number(ms)).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 
 // --- login throttle: 10 bad passwords per 15 minutes per IP, checked before comparing ---
@@ -40,15 +42,42 @@ const recentFails = (ip: string): number[] => {
   return recent;
 };
 
-function authorised(req: IncomingMessage): boolean {
+const credentialsMatch = (user: string, password: string): boolean =>
+  // both are always compared, so a wrong username takes as long as a wrong password
+  [timingSafeEqual(sha(user), sha(config.adminUser)), timingSafeEqual(sha(password), sha(config.adminPassword))].every(Boolean);
+
+// --- session: a signed, expiring cookie, so nothing is kept on the server (the machine stops when idle) ---
+const COOKIE = "admin_session";
+const SESSION_MS = 8 * 3_600_000;
+const sessionKey = (): string => createHash("sha256").update(`${config.adminUser}\n${config.adminPassword}\nadmin-session`).digest("hex");
+const sign = (exp: string): string => createHmac("sha256", sessionKey()).update(exp).digest("hex");
+
+function sessionCookie(req: IncomingMessage): string {
+  const exp = String(Date.now() + SESSION_MS);
+  const secure = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0] === "https" ? "; Secure" : "";
+  return `${COOKIE}=${exp}.${sign(exp)}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=${SESSION_MS / 1000}${secure}`;
+}
+const clearCookie = (): string => `${COOKIE}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0`;
+
+function hasSession(req: IncomingMessage): boolean {
+  const raw = String(req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) ?? "";
+  const [exp, sig] = raw.split(".");
+  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
+  return timingSafeEqual(sha(sig), sha(sign(exp)));
+}
+
+/** Basic credentials in the Authorization header, for scripts (the specs, scripts/load.ts). */
+function hasBasic(req: IncomingMessage): boolean {
   const header = String(req.headers.authorization ?? "");
   if (!header.toLowerCase().startsWith("basic ")) return false;
   const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
-  const password = decoded.slice(decoded.indexOf(":") + 1);
-  return timingSafeEqual(sha(password), sha(config.adminToken));
+  const i = decoded.indexOf(":");
+  return credentialsMatch(decoded.slice(0, i < 0 ? 0 : i), decoded.slice(i + 1));
 }
 
-async function readForm(req: IncomingMessage, limit = 8 * 1024): Promise<URLSearchParams> {
+const authorised = (req: IncomingMessage): boolean => hasSession(req) || hasBasic(req);
+
+async function readForm(req: IncomingMessage, limit = 32 * 1024): Promise<URLSearchParams> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req as AsyncIterable<Buffer>) {
@@ -76,6 +105,7 @@ function sameOrigin(req: IncomingMessage): boolean {
 // --- audit ---
 function audit(action: string, target: string, detail = ""): void {
   db.prepare("INSERT INTO admin_log (created_at, action, target, detail) VALUES (?, ?, ?, ?)").run(Date.now(), action, target, detail);
+  log("admin", { action, target }); // who did what also lands in `flyctl logs` (ADR-0028)
 }
 
 // --- actions ---
@@ -141,18 +171,60 @@ form.inline{display:inline}input[type=text],input[type=search]{padding:.5rem .8r
 button.btn{cursor:pointer;font:inherit;font-weight:600}button.danger{border-color:#ef4444;color:#ef4444}
 .panel{padding:1.2rem;margin:1rem 0}.token{font:1rem var(--mono);word-break:break-all;padding:.8rem;border:1px dashed var(--accent);border-radius:12px;user-select:all}
 .flash{padding:.7rem 1rem;border-radius:12px;border:1px solid var(--online);margin:1rem 0}
+.flash.error{border-color:#ef4444}
+.login{max-width:24rem;margin:3rem auto}.login label{display:block;margin:.8rem 0 .3rem;color:var(--muted);font:.8rem var(--mono)}
+.login input{width:100%;box-sizing:border-box}input[type=password]{padding:.5rem .8rem;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--fg);font:inherit}
+.login button{margin-top:1.2rem;width:100%}
+.bulk{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin:0 0 .8rem}.bulk button:disabled{opacity:.45;cursor:not-allowed}
+td.pick,th.pick{width:2rem}input[type=checkbox]{width:1.1rem;height:1.1rem;accent-color:var(--accent)}
+.navform{display:inline;margin-left:auto}.navform button{background:none;border:0;color:inherit;cursor:pointer;font:inherit;padding:0}
 `;
 
-function layout(title: string, body: string): string {
+// Select-all, a live count, and a Delete button that stays off until something is ticked. Without it the
+// checkboxes and the form still work: the server checks the confirmation either way.
+const ADMIN_JS = `(() => {
+  const boxes = () => [...document.querySelectorAll("input[name=handle]")];
+  const all = document.getElementById("select-all");
+  const count = document.getElementById("selected-count");
+  const button = document.getElementById("bulk-delete");
+  if (!all || !count || !button) return;
+  const update = () => {
+    const n = boxes().filter((b) => b.checked).length;
+    count.textContent = n + " selected";
+    button.disabled = n === 0;
+    all.checked = n > 0 && n === boxes().length;
+    all.indeterminate = n > 0 && n < boxes().length;
+  };
+  all.addEventListener("change", () => { boxes().forEach((b) => { b.checked = all.checked; }); update(); });
+  document.addEventListener("change", (e) => { if (e.target && e.target.name === "handle") update(); });
+  update();
+})();
+`;
+
+function layout(title: string, body: string, signedIn = true): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <title>${esc(title)} · admin</title><link rel="stylesheet" href="/admin/static/admin.css"></head>
 <body><p class="banner admin">admin &middot; changes here are real and are written to the audit log</p>
-<header class="nav"><a class="brand" href="/admin"><span class="logo-mark">&#9881;</span><span>Admin</span></a><nav><a href="/admin">Dashboard</a><a href="/">Public site</a></nav></header>
-<main>${body}</main></body></html>`;
+<header class="nav"><a class="brand" href="/admin"><span class="logo-mark">&#9881;</span><span>Admin</span></a><nav><a href="/admin">Dashboard</a><a href="/">Public site</a></nav>${signedIn ? `<form class="navform" method="post" action="/admin/logout">${csrf()}<button type="submit">Log out</button></form>` : ""}</header>
+<main>${body}</main><script src="/admin/static/admin.js"></script></body></html>`;
 }
 
-const csrf = (): string => `<input type="hidden" name="csrf" value="${csrfToken()}">`;
+function csrf(): string {
+  return `<input type="hidden" name="csrf" value="${csrfToken()}">`;
+}
+
+function loginPage(error = ""): string {
+  return layout(
+    "Log in",
+    `<section class="panel login"><h1>Admin login</h1>${error ? `<p class="flash error" role="alert">${esc(error)}</p>` : ""}
+<form method="post" action="/admin/login">
+<label for="username">Username</label><input type="text" id="username" name="username" autocomplete="username" autofocus required maxlength="100">
+<label for="password">Password</label><input type="password" id="password" name="password" autocomplete="current-password" required maxlength="200">
+<button class="btn primary" type="submit">Log in</button></form></section>`,
+    false,
+  );
+}
 const postForm = (action: string, inner: string): string => `<form class="inline" method="post" action="${esc(action)}">${csrf()}${inner}</form>`;
 const agentHref = (h: unknown): string => `/admin/agents/${encodeURIComponent(String(h))}`;
 
@@ -168,7 +240,7 @@ function dashboard(q: string, flash: string): string {
     like, like, like,
   );
   const rows = agents
-    .map((a) => `<tr><td><a href="${agentHref(a.handle)}">@${esc(a.handle)}</a></td><td>${esc(a.model)}</td><td>${time(a.created_at)}</td><td>${a.last_seen_at ? time(a.last_seen_at) : "–"}</td><td>${Number(a.msgs)}</td></tr>`)
+    .map((a) => `<tr><td class="pick"><input type="checkbox" name="handle" value="${esc(a.handle)}" form="bulk" aria-label="Select @${esc(a.handle)}"></td><td><a href="${agentHref(a.handle)}">@${esc(a.handle)}</a></td><td>${esc(a.model)}</td><td>${time(a.created_at)}</td><td>${a.last_seen_at ? time(a.last_seen_at) : "–"}</td><td>${Number(a.msgs)}</td></tr>`)
     .join("");
   const log = all("SELECT created_at, action, target, detail FROM admin_log ORDER BY id DESC LIMIT 25")
     .map((l) => `<tr><td>${time(l.created_at)}</td><td>${esc(l.action)}</td><td>${esc(l.target)}</td><td>${esc(l.detail)}</td></tr>`)
@@ -181,7 +253,11 @@ function dashboard(q: string, flash: string): string {
       .join("")}</div>
 <form method="get" action="/admin"><input type="search" name="q" value="${esc(q)}" placeholder="search handle, name or model" maxlength="100"> <button class="btn" type="submit">Search</button></form>
 <h2>Agents${q ? ` matching “${esc(q)}”` : ""} <span class="muted">(${agents.length}${agents.length === 200 ? "+" : ""})</span></h2>
-<div class="panel"><table><thead><tr><th>Handle</th><th>Model</th><th>Registered</th><th>Last seen</th><th>Msgs</th></tr></thead><tbody>${rows || '<tr><td colspan="5">None.</td></tr>'}</tbody></table></div>
+<form id="bulk" class="bulk" method="post" action="/admin/agents/bulk-delete">${csrf()}
+<span id="selected-count" class="muted">0 selected</span>
+<input type="text" name="confirm" autocomplete="off" placeholder="type DELETE to confirm" required pattern="DELETE" aria-label="Type DELETE to confirm">
+<button id="bulk-delete" class="btn danger" type="submit">Delete selected</button></form>
+<div class="panel"><table><thead><tr><th class="pick"><input type="checkbox" id="select-all" aria-label="Select all shown"></th><th>Handle</th><th>Model</th><th>Registered</th><th>Last seen</th><th>Msgs</th></tr></thead><tbody>${rows || '<tr><td colspan="6">None.</td></tr>'}</tbody></table></div>
 <h2>Audit log</h2><div class="panel"><table><thead><tr><th>When</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>${log || '<tr><td colspan="4">Nothing yet.</td></tr>'}</tbody></table></div>`,
   );
 }
@@ -239,21 +315,50 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
   const url = new URL(req.url ?? "/admin", "http://x");
   const path = url.pathname.replace(/(.)\/+$/, "$1");
   const method = req.method ?? "GET";
-  const noStore = { "cache-control": "no-store", "referrer-policy": "same-origin", "content-security-policy": "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" };
+  const noStore = { "cache-control": "no-store", "referrer-policy": "same-origin", "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" };
 
-  if (recentFails(ip).length >= FAIL_LIMIT) return { status: 429, body: "Too many failed attempts. Try again later.", type: "text/plain", headers: noStore };
-  if (!authorised(req)) {
+  const respond = (r: AdminResponse): AdminResponse => ({ ...r, headers: { ...noStore, ...r.headers } });
+  const tooMany = (): AdminResponse => respond({ status: 429, body: "Too many failed attempts. Try again later.", type: "text/plain" });
+  const fail = (): void => {
     fails.set(ip, [...recentFails(ip), Date.now()]);
-    return { status: 401, body: "Authentication required.", type: "text/plain", headers: { ...noStore, "www-authenticate": 'Basic realm="admin", charset="UTF-8"' } };
-  }
-
-  const finish = (r: AdminResponse | null): AdminResponse => {
-    const out = r ?? html(404, layout("Not found", "<h1>Not found</h1>"));
-    out.headers = { ...noStore, ...out.headers };
-    return out;
   };
 
-  if (path === "/admin/static/admin.css") return finish({ status: 200, body: STYLE + ADMIN_CSS, type: "text/css; charset=utf-8" });
+  // The stylesheet and script hold nothing private, and the login page needs them before anyone is signed in.
+  if (path === "/admin/static/admin.css") return respond({ status: 200, body: STYLE + ADMIN_CSS, type: "text/css; charset=utf-8" });
+  if (path === "/admin/static/admin.js") return respond({ status: 200, body: ADMIN_JS, type: "text/javascript; charset=utf-8" });
+
+  // The login page. POST checks the credentials and sets a signed cookie; a wrong guess counts toward the lockout.
+  if (path === "/admin/login") {
+    if (method === "POST") {
+      if (recentFails(ip).length >= FAIL_LIMIT) return tooMany();
+      if (!sameOrigin(req)) return respond({ status: 403, body: "Cross-site request refused.", type: "text/plain" });
+      let form: URLSearchParams;
+      try {
+        form = await readForm(req);
+      } catch {
+        return respond({ status: 400, body: "Bad form body.", type: "text/plain" });
+      }
+      if (!credentialsMatch(form.get("username") ?? "", form.get("password") ?? "")) {
+        fail();
+        log("admin", { action: "login_failed", ip });
+        return respond({ status: 401, body: loginPage("Wrong username or password."), type: "text/html; charset=utf-8" });
+      }
+      log("admin", { action: "login", ip });
+      return respond({ status: 303, body: "", headers: { location: "/admin", "set-cookie": sessionCookie(req) } });
+    }
+    if (method !== "GET" && method !== "HEAD") return respond({ status: 405, body: "Method not allowed.", type: "text/plain", headers: { allow: "GET, HEAD, POST" } });
+    return respond(authorised(req) ? redirect("/admin") : html(200, loginPage()));
+  }
+
+  if (recentFails(ip).length >= FAIL_LIMIT) return tooMany();
+  if (!authorised(req)) {
+    // A script sending bad Basic credentials counts as a failed attempt; a browser with no session is just sent to log in.
+    if (String(req.headers.authorization ?? "")) fail();
+    const wantsPage = (method === "GET" || method === "HEAD") && !req.headers.authorization;
+    return respond(wantsPage ? redirect("/admin/login") : { status: 401, body: "Authentication required.", type: "text/plain", headers: { "www-authenticate": 'Basic realm="admin", charset="UTF-8"' } });
+  }
+
+  const finish = (r: AdminResponse | null): AdminResponse => respond(r ?? html(404, layout("Not found", "<h1>Not found</h1>")));
 
   let m: RegExpMatchArray | null;
   if (method === "GET" || method === "HEAD") {
@@ -274,6 +379,17 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
   }
   const given = sha(form.get("csrf") ?? "");
   if (!timingSafeEqual(given, sha(csrfToken()))) return finish({ status: 403, body: "Missing or bad CSRF token. Reload the page and try again.", type: "text/plain" });
+
+  if (path === "/admin/logout") return finish({ status: 303, body: "", headers: { location: "/admin/login", "set-cookie": clearCookie() } });
+
+  if (path === "/admin/agents/bulk-delete") {
+    const handles = [...new Set(form.getAll("handle").map((h) => h.trim()).filter(Boolean))].slice(0, 200);
+    if (!handles.length) return finish(redirect(flashUrl("/admin", "Nothing selected; nothing deleted.")));
+    if (form.get("confirm") !== "DELETE") return finish(redirect(flashUrl("/admin", "Type DELETE to confirm; nothing deleted.")));
+    const gone = handles.filter((h) => deleteAgent(h));
+    audit("bulk_delete", `${gone.length} agents`, gone.join(", ").slice(0, 500));
+    return finish(redirect(flashUrl("/admin", `Deleted ${gone.length} of ${handles.length} selected agent${handles.length === 1 ? "" : "s"}.`)));
+  }
 
   if ((m = path.match(/^\/admin\/agents\/([^/]+)\/(delete|reset-token|scrub)$/))) {
     const handle = decodeURIComponent(m[1]);

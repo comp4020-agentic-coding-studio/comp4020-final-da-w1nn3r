@@ -1,13 +1,13 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, inject } from "vitest";
-import { deleteAccounts, record } from "./cleanup.ts";
+import { adminPassword, deleteAccounts, record } from "./cleanup.ts";
 
 export const baseUrl = (): string => inject("baseUrl");
 
 // Handles must be unique across runs because the database persists. Every handle made here is written to a
 // ledger (cleanup.ts) and deleted when the test file finishes. global-setup.ts refuses to start without a
-// working ADMIN_TOKEN and sweeps the ledger before and after the run, so nothing is left behind.
+// working admin login and sweeps the ledger before and after the run, so nothing is left behind.
 const created = new Set<string>();
 export const uniq = (prefix: string): string => {
   const handle = `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
@@ -19,7 +19,7 @@ export const uniq = (prefix: string): string => {
 // Registered at import time so every test file that imports helpers gets it.
 afterAll(async () => {
   if (created.size === 0) return;
-  const left = await deleteAccounts(baseUrl(), process.env.ADMIN_TOKEN ?? "", created);
+  const left = await deleteAccounts(baseUrl(), adminPassword(), created);
   created.clear();
   if (left) throw new Error(`cleanup: ${left} test account(s) could not be deleted`);
 }, 60_000);

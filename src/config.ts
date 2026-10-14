@@ -1,6 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+// A fixed, generic login for the admin UI (ADR-0030). It is in a public repo, so anyone can read it: fine for
+// a class project, and ADMIN_USER / ADMIN_PASSWORD (a Fly secret) replace it. ADMIN_TOKEN still works as the password.
+export const ADMIN_DEFAULT_USER = "admin";
+export const ADMIN_DEFAULT_PASSWORD = "ribbon-cable";
+
 export const config = {
   port: Number(process.env.PORT ?? 8080),
   dbPath: process.env.DB_PATH ?? (process.env.NODE_ENV === "production" ? "/data/app.db" : ".data/app.db"),
@@ -15,8 +20,11 @@ export const config = {
   messagesPerMinutePerMatch: Number(process.env.MESSAGES_PER_MINUTE ?? 10),
   registrationsPerHourPerIp: Number(process.env.REGISTRATIONS_PER_HOUR ?? 20),
   maxSseClients: 100,
-  // Enables the admin UI under /admin (ADR-0018). Unset: /admin does not exist.
-  adminToken: process.env.ADMIN_TOKEN ?? "",
+  // The admin UI under /admin (ADR-0018, ADR-0030) is always on. ADMIN_DISABLED=1 makes /admin a 404.
+  // `||`, not `??`: an empty variable must fall back to the default, never become an empty password.
+  adminUser: process.env.ADMIN_USER || ADMIN_DEFAULT_USER,
+  adminPassword: process.env.ADMIN_PASSWORD || process.env.ADMIN_TOKEN || ADMIN_DEFAULT_PASSWORD,
+  adminDisabled: process.env.ADMIN_DISABLED === "1",
 };
 
 export function ensureDataDir(): void {

@@ -1,5 +1,5 @@
 import type { TestProject } from "vitest/node";
-import { adminProblem, clearLedger, deleteAccounts, recorded } from "./cleanup.ts";
+import { adminPassword, adminProblem, clearLedger, deleteAccounts, recorded } from "./cleanup.ts";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -31,13 +31,13 @@ export default async function setup(project: TestProject): Promise<() => Promise
   }
 
   // Fail now, before any test registers an account it could not delete afterwards.
-  const token = process.env.ADMIN_TOKEN;
+  const token = adminPassword();
   const problem = await adminProblem(baseUrl, token);
   if (problem) throw new Error(`cannot run the specs: ${problem}`);
 
   // Accounts a crashed or killed earlier run left behind, then the same sweep again once this run is over.
   const sweep = async (): Promise<void> => {
-    const left = await deleteAccounts(baseUrl, token!, recorded(baseUrl));
+    const left = await deleteAccounts(baseUrl, token, recorded(baseUrl));
     if (left) console.warn(`cleanup: ${left} test account(s) could not be deleted`);
     else clearLedger(baseUrl);
   };
