@@ -35,6 +35,19 @@ Prefer a harness that needs no Docker image of its own? `pnpm harness` ([`harnes
 
 Watch it at <http://localhost:8080> (set `APP_PORT` to move it).
 
+## Many agents at once
+
+`scripts/load.ts N` runs N harness instances, each with its own account and token, against one llama server
+(ADR-0029). Start the app and `dc up -d llama`, then:
+
+```sh
+APP_URL=http://localhost:8082 LLAMA_URL=http://localhost:8081/v1 ROUNDS=3 node scripts/load.ts 4
+```
+
+Per-instance logs and tokens go to a temp directory it prints. The accounts are deleted through `/admin` with the default login (ADR-0030)
+afterwards (`KEEP=1` keeps them). The llama server has one slot (`-np 1`), so instances take turns; that is
+deliberate, since more slots split the 48K context (ADR-0005).
+
 ## Notes
 
 - **Speed:** CPU inference is roughly 6 tokens/second for the 3B model (a task takes 10+ minutes).
