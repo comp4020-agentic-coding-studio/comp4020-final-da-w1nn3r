@@ -9,6 +9,9 @@ import { allow } from "./ratelimit.ts";
 /** An error whose message is safe and useful to show to the calling agent. */
 export class UserError extends Error {}
 
+/** A UserError for "that is not yours": logged as `denied`, so refusals to outsiders stand out (ADR-0028). */
+export class Denied extends UserError {}
+
 export interface Agent {
   id: number;
   handle: string;
@@ -230,7 +233,7 @@ const matchPartner = (match: Row, agent: Agent): number =>
 function ownMatch(agent: Agent, matchId: number): Row {
   const match = one("SELECT * FROM matches WHERE id = ? AND ? IN (agent_a, agent_b)", matchId, agent.id);
   // Same message whether it doesn't exist or isn't yours: don't reveal other matches.
-  if (!match) throw new UserError(`You have no match with id ${matchId}. Use list_matches to see yours.`);
+  if (!match) throw new Denied(`You have no match with id ${matchId}. Use list_matches to see yours.`);
   return match;
 }
 

@@ -2,8 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { config } from "./config.ts";
+import { log } from "./log.ts";
 import * as svc from "./service.ts";
-import { UserError, type Agent } from "./service.ts";
+import { Denied, UserError, type Agent } from "./service.ts";
 
 const handle = z
   .string()
@@ -215,18 +216,30 @@ export function buildServer(agent: Agent | null, ip: string): McpServer {
   );
 
   // Wraps a handler: auth, rate limit, and turning UserErrors into tool errors the agent can act on.
+  // Every call is logged with who made it and how it ended (ADR-0028): ids and choices only, never text.
   const authed =
     <A>(tool: string, fn: (agent: Agent, args: A) => unknown) =>
     async (args: A): Promise<CallToolResult> => {
-      if (!agent) return fail(NOT_LOGGED_IN);
+      const t0 = Date.now();
+      const a = (args ?? {}) as R;
+      const what = { tool, ip, match_id: a.match_id, target: a.handle, direction: a.direction };
+      if (!agent) {
+        log("mcp", { ...what, actor: null, outcome: "unauthenticated" });
+        return fail(NOT_LOGGED_IN);
+      }
       try {
         svc.checkCallRate(agent);
         svc.touch(agent);
         const result = fn(agent, args);
+        log("mcp", { ...what, actor: agent.handle, outcome: "ok", ms: Date.now() - t0 });
         return text(result, SUMMARIES[tool]?.(result as R, args as R));
       } catch (err) {
-        if (err instanceof UserError) return fail(err.message);
+        if (err instanceof UserError) {
+          log("mcp", { ...what, actor: agent.handle, outcome: err instanceof Denied ? "denied" : "refused", error: err.message, ms: Date.now() - t0 });
+          return fail(err.message);
+        }
         console.error("tool error", err);
+        log("mcp", { ...what, actor: agent.handle, outcome: "error", ms: Date.now() - t0 });
         return fail("Internal error. Try again.");
       }
     };
@@ -253,6 +266,7 @@ export function buildServer(agent: Agent | null, ip: string): McpServer {
           },
           ip,
         );
+        log("mcp", { tool: "register", ip, actor: created.handle, model: args.model.trim(), outcome: "ok" });
         return text({
           registered: true,
           handle: created.handle,
@@ -262,7 +276,10 @@ export function buildServer(agent: Agent | null, ip: string): McpServer {
           next: "Call get_next_profiles, then swipe.",
         }, `Registered as @${created.handle}. Save the token from the JSON above now: it is not shown again. Next, call get_next_profiles, then swipe.`);
       } catch (err) {
-        if (err instanceof UserError) return fail(err.message);
+        if (err instanceof UserError) {
+          log("mcp", { tool: "register", ip, actor: null, target: args.handle, outcome: "refused", error: err.message });
+          return fail(err.message);
+        }
         console.error("register error", err);
         return fail("Internal error. Try again.");
       }
