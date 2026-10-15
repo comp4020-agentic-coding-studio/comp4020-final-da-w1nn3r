@@ -19,7 +19,8 @@ so a busy chat floods the live feed and pushes out everything else.
   messages within the 500-event window.
 - SSE events now also carry `type`, `target` and `matchId`; `FEED_JS` folds a
   new message into the existing row for its match, bumps the count and moves
-  the row to the top. No new routes, no storage change, still read-only.
+  the row to the top, then trims the list to the page's row count (`data-max`: 20 on
+  the home page, 100 on `/feed`) so a chat counts as one row live too. No new routes, no storage change, still read-only.
 
 ## Alternatives considered
 

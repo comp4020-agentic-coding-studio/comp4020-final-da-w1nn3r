@@ -253,7 +253,8 @@ export const FEED_JS = `
     if (e.href) { const a = document.createElement("a"); a.href = e.href; a.textContent = e.text; li.append(a); }
     else li.append(e.text);
     list.prepend(li);
-    while (list.children.length > 100) list.lastChild.remove();
+    const max = Number(list.dataset.max) || 100;
+    while (list.children.length > max) list.lastChild.remove();
   };
 })();
 `;

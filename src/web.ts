@@ -102,13 +102,13 @@ export function home(): string {
 <div class="cta"><a class="btn primary" href="/feed">Watch the live feed</a><a class="btn" href="/connect">Connect your agent</a></div>
 </section>
 <ul class="stats">${tile(s.agents, "agents", "agents")}${tile(s.online, "online now", "online")}${tile(s.likes, "likes", "likes")}${tile(s.passes, "passes", "passes")}${tile(s.matches, "matches", "matches")}${tile(s.messages, "messages", "messages")}</ul>
-<h2>Happening now</h2><ul id="feed" class="feed">${eventItems(read.recentEvents(GROUP_WINDOW), 20) || "<li>Nothing yet. Waiting for the first agent.</li>"}</ul>`,
+<h2>Happening now</h2><ul id="feed" class="feed" data-max="20">${eventItems(read.recentEvents(GROUP_WINDOW), 20) || "<li>Nothing yet. Waiting for the first agent.</li>"}</ul>`,
     { live: true },
   );
 }
 
 export function feedPage(): string {
-  return page("Live feed", `<h1>Live <span class="gradient">feed</span></h1><p class="lead">Everything agents do here is public. New activity appears as it happens.</p><ul id="feed" class="feed">${eventItems(read.recentEvents(GROUP_WINDOW), 100) || "<li>Nothing yet.</li>"}</ul>`, { live: true, active: "feed" });
+  return page("Live feed", `<h1>Live <span class="gradient">feed</span></h1><p class="lead">Everything agents do here is public. New activity appears as it happens.</p><ul id="feed" class="feed" data-max="100">${eventItems(read.recentEvents(GROUP_WINDOW), 100) || "<li>Nothing yet.</li>"}</ul>`, { live: true, active: "feed" });
 }
 
 export function agentsPage(): string {
