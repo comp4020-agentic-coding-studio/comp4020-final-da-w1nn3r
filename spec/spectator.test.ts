@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { call, matchUp, newAgent, baseUrl } from "./helpers.ts";
+import { call, humanCookie, matchUp, newAgent, baseUrl } from "./helpers.ts";
 
 const get = (path: string): Promise<Response> => fetch(new URL(path, baseUrl()));
 
@@ -82,7 +82,7 @@ describe("spectator pages", () => {
 });
 
 describe("spectators are read-only", () => {
-  const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/readme/", "/healthz", "/anything"];
+  const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/readme/", "/healthz", "/robots.txt", "/llms.txt", "/human/verify", "/anything"];
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
     it(`refuses ${method} on every web route`, async () => {
       for (const path of paths) {
@@ -119,7 +119,7 @@ describe("untrusted text", () => {
 describe("live feed", () => {
   it("streams new events over SSE", async () => {
     const ctrl = new AbortController();
-    const res = await fetch(new URL("/feed/stream", baseUrl()), { signal: ctrl.signal });
+    const res = await fetch(new URL("/feed/stream", baseUrl()), { signal: ctrl.signal, headers: { cookie: await humanCookie() } });
     expect(res.headers.get("content-type")).toContain("text/event-stream");
     const reader = res.body!.getReader();
     const a = await newAgent("live");
@@ -156,7 +156,7 @@ describe("live feed", () => {
   // Reads whatever the stream sends in its first `ms` milliseconds.
   async function readFor(lastEventId: number, ms: number): Promise<string> {
     const ctrl = new AbortController();
-    const res = await fetch(new URL("/feed/stream", baseUrl()), { signal: ctrl.signal, headers: { "last-event-id": String(lastEventId) } });
+    const res = await fetch(new URL("/feed/stream", baseUrl()), { signal: ctrl.signal, headers: { "last-event-id": String(lastEventId), cookie: await humanCookie() } });
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let seen = "";
@@ -184,5 +184,48 @@ describe("live feed", () => {
   it("caps the replay for a very old Last-Event-ID", async () => {
     const seen = await readFor(1, 1000);
     expect(seen.match(/^id: /gm)?.length ?? 0).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("human check (ADR-0036)", () => {
+  it("refuses the live stream without it, and leaves the pages open", async () => {
+    expect((await get("/feed/stream")).status).toBe(403);
+    expect((await get("/")).status).toBe(200);
+    expect((await get("/readme/")).status).toBe(200);
+  });
+
+  it("lets the stream through after a solved challenge", async () => {
+    const ctrl = new AbortController();
+    const res = await fetch(new URL("/feed/stream", baseUrl()), { signal: ctrl.signal, headers: { cookie: await humanCookie() } });
+    expect(res.status).toBe(200);
+    ctrl.abort();
+  });
+
+  it("rejects a wrong or forged solution", async () => {
+    const { challenge } = (await (await get("/human/challenge")).json()) as { challenge: string };
+    expect((await get(`/human/verify?c=${encodeURIComponent(challenge)}&n=0x`)).status).toBe(400);
+    expect((await get(`/human/verify?c=forged.${"0".repeat(16)}.${"0".repeat(64)}&n=1`)).status).toBe(400);
+    expect((await get("/feed/stream")).status).toBe(403);
+  });
+
+  it("does not accept a forged cookie", async () => {
+    const res = await fetch(new URL("/feed/stream", baseUrl()), { headers: { cookie: `human=${Date.now() + 1e9}.${"a".repeat(64)}` } });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe("bots files (ADR-0036)", () => {
+  it("serves robots.txt that keeps crawlers off the write surfaces", async () => {
+    const res = await get("/robots.txt");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/plain");
+    const body = await res.text();
+    for (const p of ["/admin", "/mcp", "/feed/stream"]) expect(body).toContain(`Disallow: ${p}`);
+  });
+
+  it("serves llms.txt that points agents at the MCP endpoint", async () => {
+    const body = await (await get("/llms.txt")).text();
+    expect(body).toContain("/mcp");
+    expect(body).toContain("/connect");
   });
 });

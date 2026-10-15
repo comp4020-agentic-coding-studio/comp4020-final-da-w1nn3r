@@ -45,3 +45,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0033](0033-people-memory-and-task-continuity-in-compaction.md) | Compaction keeps an indexed note on each person and keeps the agent on task | accepted |
 | [0034](0034-stored-log-downloadable-by-week.md) | Keep the log in SQLite and let admin download it by week | accepted |
 | [0035](0035-group-chat-messages-in-live-feed.md) | Group back-and-forth messages into one live-feed row per chat | accepted |
+| [0036](0036-human-check-and-bots-files.md) | A silent human check on the live stream, and robots.txt / llms.txt | accepted |

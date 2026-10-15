@@ -4,6 +4,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import "./applog.ts";
 import { handleAdmin, isAdminPath } from "./admin.ts";
 import { config } from "./config.ts";
+import { checkSolution, humanCookie, isHuman, newChallenge } from "./human.ts";
+import { allow } from "./ratelimit.ts";
 import { ARCHIVE_NAME, archive, installScript, validOrigin } from "./harness-dist.ts";
 import { listenerCount, onNewEvent } from "./events.ts";
 import { log } from "./log.ts";
@@ -11,6 +13,7 @@ import { buildServer } from "./mcp.ts";
 import * as read from "./read.ts";
 import { authenticate } from "./service.ts";
 import * as web from "./web.ts";
+import { llmsTxt, robotsTxt } from "./bots.ts";
 
 const CSP =
   "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -118,6 +121,7 @@ function currentStats(id: number): ReturnType<typeof read.stats> {
 }
 
 function handleStream(req: IncomingMessage, res: ServerResponse): void {
+  if (!isHuman(req)) return send(res, 403, "Human check required: solve it at /human/challenge, then /human/verify.", "text/plain", { "cache-control": "no-store" });
   if (listenerCount() >= config.maxSseClients) return send(res, 503, "Too many live viewers. Try again shortly.", "text/plain");
   res.writeHead(200, {
     "content-type": "text/event-stream",
@@ -178,6 +182,15 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   }
   if (path === "/feed") return html(res, 200, web.feedPage());
   if (path === "/feed/stream") return handleStream(req, res);
+  if (path === "/human/challenge") return send(res, 200, JSON.stringify(isHuman(req) ? { human: true } : newChallenge()), "application/json", { "cache-control": "no-store" });
+  if (path === "/human/verify") {
+    // Solving costs the visitor, not us, but cap it anyway so nobody can mint cookies in a loop.
+    if (!allow(`human:${clientIp(req)}`, 30, 3_600_000)) return send(res, 429, "Too many attempts. Try again later.", "text/plain");
+    const ok = checkSolution(url.searchParams.get("c") ?? "", url.searchParams.get("n") ?? "");
+    return ok ? send(res, 204, "", "text/plain", { "set-cookie": humanCookie(req), "cache-control": "no-store" }) : send(res, 400, "Wrong solution.", "text/plain");
+  }
+  if (path === "/robots.txt") return send(res, 200, robotsTxt(origin(req)), "text/plain; charset=utf-8", { "cache-control": "public, max-age=3600" });
+  if (path === "/llms.txt") return send(res, 200, llmsTxt(origin(req)), "text/plain; charset=utf-8", { "cache-control": "public, max-age=3600" });
   if (path === "/connect") return html(res, 200, web.connectPage(origin(req)));
   if (path === "/harness") return html(res, 200, web.harnessPage(origin(req)));
   if (path === "/harness/install.sh" || path === `/harness/${ARCHIVE_NAME}`) {
@@ -203,7 +216,7 @@ async function handleAdminRoute(req: IncomingMessage, res: ServerResponse): Prom
 
 // One line per web request (ADR-0028). Static files, the health check and successful /mcp calls are
 // left out: the last already has a richer `mcp` line. The query string is never logged.
-const QUIET = /^\/(static\/|healthz$)/;
+const QUIET = /^\/(static\/|healthz$|robots\.txt$|llms\.txt$)/;
 function logRequest(req: IncomingMessage, res: ServerResponse, path: string, t0: number): void {
   if (QUIET.test(path) || (path === "/mcp" && res.statusCode < 400)) return;
   log("http", {

@@ -220,6 +220,21 @@ export const FEED_JS = `
       } catch {}
     }, 150);
   };
+  // Human check: solve a small proof-of-work (no UI), which sets a cookie the stream requires (ADR-0036).
+  const sha256 = async (t) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
+  const zeros = (h) => { let n = 0; for (const b of h) { if (b === 0) { n += 8; continue; } return n + Math.clz32(b) - 24; } return n; };
+  const prove = async () => {
+    const { challenge, bits, human } = await (await fetch("/human/challenge")).json();
+    if (human) return true;
+    for (let n = 0; ; n++) {
+      if (zeros(await sha256(challenge + n)) >= bits) return (await fetch("/human/verify?c=" + encodeURIComponent(challenge) + "&n=" + n)).ok;
+    }
+  };
+  const start = async () => {
+    try { if (!(await prove())) return; } catch { return; }
+    open();
+  };
+  const open = () => {
   const es = new EventSource("/feed/stream");
   es.onmessage = (m) => {
     const e = JSON.parse(m.data);
@@ -256,5 +271,7 @@ export const FEED_JS = `
     const max = Number(list.dataset.max) || 100;
     while (list.children.length > max) list.lastChild.remove();
   };
+  };
+  start();
 })();
 `;

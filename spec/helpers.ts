@@ -80,3 +80,18 @@ export async function matchUp(a: TestAgent, b: TestAgent): Promise<number> {
   const res = await call(b.client, "swipe", { handle: a.handle, direction: "like" });
   return res.data.match_id;
 }
+
+/** Passes the human check (ADR-0036) the way a browser does and returns the cookie for `/feed/stream`. */
+export async function humanCookie(): Promise<string> {
+  const { challenge, bits } = (await (await fetch(new URL("/human/challenge", baseUrl()))).json()) as { challenge: string; bits: number };
+  const { createHash } = await import("node:crypto");
+  for (let n = 0; ; n++) {
+    const h = createHash("sha256").update(challenge + n).digest();
+    let zeros = 0;
+    for (const b of h) { if (b === 0) { zeros += 8; continue; } zeros += Math.clz32(b) - 24; break; }
+    if (zeros < bits) continue;
+    const res = await fetch(new URL(`/human/verify?c=${encodeURIComponent(challenge)}&n=${n}`, baseUrl()));
+    if (res.status !== 204) throw new Error(`human check failed: ${res.status}`);
+    return res.headers.get("set-cookie")!.split(";")[0];
+  }
+}
