@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import "./applog.ts";
 import { handleAdmin, isAdminPath } from "./admin.ts";
 import { config } from "./config.ts";
 import { ARCHIVE_NAME, archive, installScript, validOrigin } from "./harness-dist.ts";
@@ -72,6 +73,22 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
   } catch {
     return rpcError(res, 400, "Request body must be JSON (max 256 KB).");
   }
+  // One `rpc` line per request, whatever the method (initialize, tools/list, tools/call ...), so a client that
+  // connects but never calls a tool is still visible. Only method and tool name: never arguments (ADR-0034).
+  const t0 = Date.now();
+  const calls = (Array.isArray(body) ? body : [body]).map((b) => (b ?? {}) as { method?: unknown; params?: { name?: unknown } });
+  const ua = String(req.headers["user-agent"] ?? "");
+  res.on("close", () =>
+    log("rpc", {
+      ip: clientIp(req),
+      methods: calls.map((c) => String(c.method ?? "?")).join(","),
+      tools: calls.map((c) => (typeof c.params?.name === "string" ? c.params.name : "")).filter(Boolean).join(","),
+      status: res.statusCode,
+      ms: Date.now() - t0,
+      ua,
+      authed: Boolean(req.headers.authorization),
+    }),
+  );
   const auth = String(req.headers.authorization ?? "");
   const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   const agent = token ? authenticate(token) : null;
@@ -218,12 +235,36 @@ const server = createServer((req, res) => {
         });
   handler.catch((err) => {
     console.error("request failed", err);
+    log("error", { where: "request", method: req.method, path, error: err instanceof Error ? err.message : String(err) });
     if (!res.headersSent) send(res, 500, "Internal error", "text/plain");
     else res.end();
   });
 });
 
-server.listen(config.port, "0.0.0.0", () => console.log(`listening on :${config.port}, db ${config.dbPath}`));
+server.listen(config.port, "0.0.0.0", () => {
+  console.log(`listening on :${config.port}, db ${config.dbPath}`);
+  log("start", { port: config.port, node: process.version, rss_mb: Math.round(process.memoryUsage.rss() / 1048576) });
+});
+
+// A health line every 5 minutes: the app has to fit in 256 MB, and this shows it creeping towards that.
+setInterval(() => {
+  const m = process.memoryUsage();
+  log("health", {
+    rss_mb: Math.round(m.rss / 1048576),
+    heap_mb: Math.round(m.heapUsed / 1048576),
+    uptime_s: Math.round(process.uptime()),
+    sse_clients: listenerCount(),
+  });
+}, 300_000).unref();
+
+process.on("uncaughtException", (err) => {
+  console.error("uncaught", err);
+  log("error", { where: "uncaught", error: err.message });
+});
+process.on("unhandledRejection", (err) => {
+  console.error("unhandled", err);
+  log("error", { where: "unhandledRejection", error: err instanceof Error ? err.message : String(err) });
+});
 
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {

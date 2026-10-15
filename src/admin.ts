@@ -6,6 +6,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { config } from "./config.ts";
+import { download, weeks } from "./applog.ts";
 import { db, tx } from "./db.ts";
 import { log } from "./log.ts";
 import { hash, newToken } from "./service.ts";
@@ -206,7 +207,7 @@ function layout(title: string, body: string, signedIn = true): string {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <title>${esc(title)} · admin</title><link rel="stylesheet" href="/admin/static/admin.css"></head>
 <body><p class="banner admin">admin &middot; changes here are real and are written to the audit log</p>
-<header class="nav"><a class="brand" href="/admin"><span class="logo-mark">&#9881;</span><span>Admin</span></a><nav><a href="/admin">Dashboard</a><a href="/">Public site</a></nav>${signedIn ? `<form class="navform" method="post" action="/admin/logout">${csrf()}<button type="submit">Log out</button></form>` : ""}</header>
+<header class="nav"><a class="brand" href="/admin"><span class="logo-mark">&#9881;</span><span>Admin</span></a><nav><a href="/admin">Dashboard</a><a href="/admin/logs">Logs</a><a href="/">Public site</a></nav>${signedIn ? `<form class="navform" method="post" action="/admin/logout">${csrf()}<button type="submit">Log out</button></form>` : ""}</header>
 <main>${body}</main><script src="/admin/static/admin.js"></script></body></html>`;
 }
 
@@ -305,6 +306,18 @@ ${postForm(`/admin/agents/${h}/delete`, '<input type="text" name="confirm" autoc
   };
 }
 
+function logsPage(): string {
+  const rows = weeks()
+    .map((w) => `<tr><td>${esc(w.week)}</td><td>${time(w.start).slice(0, 10)}</td><td>${w.mcp}</td><td>${w.lines}</td><td><a class="btn" href="/admin/logs/download?week=${esc(w.week)}">Download</a></td></tr>`)
+    .join("");
+  return layout(
+    "Logs",
+    `<h1>Logs</h1><p class="muted">Every line the app writes (MCP calls, web requests, logins, errors, health) is kept for ${config.logRetentionDays} days. Weeks run Monday to Sunday, UTC. Downloads are JSON Lines, one event per line. Tokens, message text and bios are never in them (ADR-0028).</p>
+<div class="panel"><table><thead><tr><th>Week</th><th>Starts</th><th>MCP calls</th><th>Lines</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5">Nothing logged yet.</td></tr>'}</tbody></table></div>
+<p><a class="btn" href="/admin/logs/download?week=all">Download everything kept</a></p>`,
+  );
+}
+
 const redirect = (to: string): AdminResponse => ({ status: 303, body: "", headers: { location: to } });
 const html = (status: number, body: string): AdminResponse => ({ status, body });
 const flashUrl = (path: string, msg: string): string => `${path}${path.includes("?") ? "&" : "?"}flash=${encodeURIComponent(msg)}`;
@@ -364,6 +377,19 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
   if (method === "GET" || method === "HEAD") {
     const flash = url.searchParams.get("flash") ?? "";
     if (path === "/admin") return finish(html(200, dashboard((url.searchParams.get("q") ?? "").slice(0, 100), flash)));
+    if (path === "/admin/logs") return finish(html(200, logsPage()));
+    if (path === "/admin/logs/download") {
+      const week = url.searchParams.get("week") ?? "";
+      const file = download(week);
+      if (!file) return finish({ status: 400, body: "Bad week. Use a label like 2026-W42.", type: "text/plain" });
+      log("admin", { action: "download_log", target: week, ip });
+      return finish({
+        status: 200,
+        body: file.body,
+        type: "application/x-ndjson; charset=utf-8",
+        headers: { "content-disposition": `attachment; filename="${file.name}"`, ...(file.truncated ? { "x-log-truncated": "true" } : {}) },
+      });
+    }
     if ((m = path.match(/^\/admin\/agents\/([^/]+)$/))) return finish(agentView(decodeURIComponent(m[1]), flash));
     return finish(null);
   }

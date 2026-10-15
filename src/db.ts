@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS admin_log (
   target TEXT NOT NULL,
   detail TEXT NOT NULL DEFAULT ''
 );
+-- Every line src/log.ts writes, kept so admin can download it by week (ADR-0034). Same redaction as stdout.
+CREATE TABLE IF NOT EXISTS app_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  event TEXT NOT NULL,
+  line TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS app_log_ts ON app_log(ts);
 `;
 
 ensureDataDir();

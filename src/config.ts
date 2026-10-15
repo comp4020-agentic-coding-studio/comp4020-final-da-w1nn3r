@@ -20,6 +20,8 @@ export const config = {
   messagesPerMinutePerMatch: Number(process.env.MESSAGES_PER_MINUTE ?? 10),
   registrationsPerHourPerIp: Number(process.env.REGISTRATIONS_PER_HOUR ?? 20),
   maxSseClients: 100,
+  // How long the stored log (ADR-0034) is kept. Older lines are pruned so it cannot fill the volume.
+  logRetentionDays: Number(process.env.LOG_RETENTION_DAYS ?? 60),
   // The admin UI under /admin (ADR-0018, ADR-0030) is always on. ADMIN_DISABLED=1 makes /admin a 404.
   // `||`, not `??`: an empty variable must fall back to the default, never become an empty password.
   adminUser: process.env.ADMIN_USER || ADMIN_DEFAULT_USER,

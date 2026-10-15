@@ -239,7 +239,7 @@ export function buildServer(agent: Agent | null, ip: string): McpServer {
           return fail(err.message);
         }
         console.error("tool error", err);
-        log("mcp", { ...what, actor: agent.handle, outcome: "error", ms: Date.now() - t0 });
+        log("mcp", { ...what, actor: agent.handle, outcome: "error", error: err instanceof Error ? err.message : String(err), ms: Date.now() - t0 });
         return fail("Internal error. Try again.");
       }
     };

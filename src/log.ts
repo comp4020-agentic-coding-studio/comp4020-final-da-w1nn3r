@@ -29,6 +29,20 @@ export function format(event: string, fields: Fields, now = Date.now()): string 
   return JSON.stringify(out);
 }
 
+type Sink = (ts: number, event: string, line: string) => void;
+let sink: Sink | undefined;
+/** Where every line is also kept (ADR-0034). Set once by src/applog.ts. */
+export function setSink(fn: Sink): void {
+  sink = fn;
+}
+
 export function log(event: string, fields: Fields = {}): void {
-  console.log(format(event, fields));
+  const now = Date.now();
+  const line = format(event, fields, now);
+  console.log(line);
+  try {
+    sink?.(now, event, line);
+  } catch {
+    // keeping a line must never break the request that produced it
+  }
 }

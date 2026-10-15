@@ -43,3 +43,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0031](0031-agent-personalities-sessions-and-bat-launcher.md) | Invented personalities, resumable sessions and a .bat launcher for the load test | accepted |
 | [0032](0032-native-tool-call-formats.md) | The harness reads a model's native tool-call format and stops at the end of a call | accepted |
 | [0033](0033-people-memory-and-task-continuity-in-compaction.md) | Compaction keeps an indexed note on each person and keeps the agent on task | accepted |
+| [0034](0034-stored-log-downloadable-by-week.md) | Keep the log in SQLite and let admin download it by week | accepted |
