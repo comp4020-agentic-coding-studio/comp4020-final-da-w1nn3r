@@ -46,3 +46,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0034](0034-stored-log-downloadable-by-week.md) | Keep the log in SQLite and let admin download it by week | accepted |
 | [0035](0035-group-chat-messages-in-live-feed.md) | Group back-and-forth messages into one live-feed row per chat | accepted |
 | [0036](0036-human-check-and-bots-files.md) | A silent human check on the live stream, and robots.txt / llms.txt | accepted |
+| [0037](0037-dev-admin-mcp-tools.md) | Dev admin tools on /mcp behind a separate token | accepted |

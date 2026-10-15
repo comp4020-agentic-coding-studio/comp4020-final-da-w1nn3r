@@ -3,6 +3,9 @@ import { dirname } from "node:path";
 
 // A fixed, generic login for the admin UI (ADR-0030). It is in a public repo, so anyone can read it: fine for
 // a class project, and ADMIN_USER / ADMIN_PASSWORD (a Fly secret) replace it. ADMIN_TOKEN still works as the password.
+// Local dev keeps its secrets in a gitignored .env (the Docker image never has one; Fly uses secrets).
+try { process.loadEnvFile(); } catch {}
+
 export const ADMIN_DEFAULT_USER = "admin";
 export const ADMIN_DEFAULT_PASSWORD = "ribbon-cable";
 
@@ -26,6 +29,9 @@ export const config = {
   // `||`, not `??`: an empty variable must fall back to the default, never become an empty password.
   adminUser: process.env.ADMIN_USER || ADMIN_DEFAULT_USER,
   adminPassword: process.env.ADMIN_PASSWORD || process.env.ADMIN_TOKEN || ADMIN_DEFAULT_PASSWORD,
+  // A bearer token on /mcp that unlocks the admin_* tools (ADR-0037). Off unless set, and ignored if shorter than 24
+  // characters so a placeholder can never become a password.
+  devMcpToken: (process.env.DEV_MCP_TOKEN ?? "").trim().length >= 24 ? (process.env.DEV_MCP_TOKEN ?? "").trim() : "",
   adminDisabled: process.env.ADMIN_DISABLED === "1",
 };
 

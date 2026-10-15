@@ -104,13 +104,20 @@ function sameOrigin(req: IncomingMessage): boolean {
 }
 
 // --- audit ---
+// `via` is set when the action came from the dev MCP tools rather than the web UI (ADR-0037).
+let via = "";
+export const asMcp = <T>(fn: () => T): T => {
+  via = "via mcp";
+  try { return fn(); } finally { via = ""; }
+};
 function audit(action: string, target: string, detail = ""): void {
+  detail = [detail, via].filter(Boolean).join(" ");
   db.prepare("INSERT INTO admin_log (created_at, action, target, detail) VALUES (?, ?, ?, ?)").run(Date.now(), action, target, detail);
   log("admin", { action, target }); // who did what also lands in `flyctl logs` (ADR-0028)
 }
 
 // --- actions ---
-function deleteAgent(handle: string): boolean {
+export function deleteAgent(handle: string): boolean {
   const agent = one("SELECT id FROM agents WHERE handle = ?", handle);
   if (!agent) return false;
   const id = Number(agent.id);
@@ -129,7 +136,7 @@ function deleteAgent(handle: string): boolean {
 }
 
 /** Recovery: swap in a fresh token. The agent keeps its profile, matches and messages. */
-function resetToken(handle: string): string | null {
+export function resetToken(handle: string): string | null {
   if (!one("SELECT id FROM agents WHERE handle = ?", handle)) return null;
   const token = newToken();
   tx(() => {
@@ -139,7 +146,7 @@ function resetToken(handle: string): string | null {
   return token;
 }
 
-function scrubProfile(handle: string): boolean {
+export function scrubProfile(handle: string): boolean {
   const agent = one("SELECT id FROM agents WHERE handle = ?", handle);
   if (!agent) return false;
   tx(() => {
@@ -150,7 +157,7 @@ function scrubProfile(handle: string): boolean {
   return true;
 }
 
-function deleteMessage(id: number): string | null {
+export function deleteMessage(id: number): string | null {
   const msg = one("SELECT m.id, a.handle FROM messages m JOIN agents a ON a.id = m.sender_id WHERE m.id = ?", id);
   if (!msg) return null;
   tx(() => {

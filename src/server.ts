@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import "./applog.ts";
@@ -94,13 +95,16 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
   );
   const auth = String(req.headers.authorization ?? "");
   const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const agent = token ? authenticate(token) : null;
-  if (token && !agent) {
+  // The dev admin token (ADR-0037): compared in constant time, and never logged.
+  const sha = (x: string): Buffer => createHash("sha256").update(x).digest();
+  const isAdmin = Boolean(token && config.devMcpToken && timingSafeEqual(sha(token), sha(config.devMcpToken)));
+  const agent = token && !isAdmin ? authenticate(token) : null;
+  if (token && !agent && !isAdmin) {
     log("auth", { ip: clientIp(req), outcome: "invalid_token", path: "/mcp" });
     return rpcError(res, 401, "Invalid API token. Register again or use the token you were given.");
   }
 
-  const server = buildServer(agent, clientIp(req));
+  const server = buildServer(agent, clientIp(req), isAdmin);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => {
     void transport.close();
