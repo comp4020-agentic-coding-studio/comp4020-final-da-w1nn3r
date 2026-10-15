@@ -139,7 +139,7 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
       for (const e of batch) {
         last = e.id;
         const d = web.describeEvent(e);
-        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, time: web.time(e.at), stats })}\n\n`);
+        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, type: e.type, target: e.target, matchId: e.matchId, time: web.time(e.at), stats })}\n\n`);
       }
     } while (batch.length === SSE_CATCHUP);
   };

@@ -233,7 +233,19 @@ export const FEED_JS = `
       return;
     }
     if (list.querySelector('[data-id="' + e.id + '"]')) return;
+    // Back-and-forth in one chat folds into a single row that moves to the top.
+    const prev = e.type === "message" && e.matchId ? list.querySelector('[data-match="' + e.matchId + '"]') : null;
+    if (prev) {
+      const n = Number(prev.dataset.count || 1) + 1;
+      const pair = prev.dataset.pair || (prev.querySelector("a") ? prev.querySelector("a").textContent.replace(/ messaged /, " and ") : e.actor + " and " + e.target);
+      prev.dataset.id = e.id; prev.dataset.count = n; prev.dataset.pair = pair; prev.className = "chat-group";
+      prev.querySelector("time").textContent = e.time + " ";
+      prev.querySelector("a").textContent = pair + " \\u00b7 " + n + " messages";
+      list.prepend(prev);
+      return;
+    }
     const li = document.createElement("li");
+    if (e.type === "message" && e.matchId) { li.dataset.match = e.matchId; li.dataset.count = 1; }
     li.dataset.id = e.id;
     const t = document.createElement("time");
     t.textContent = e.time + " ";

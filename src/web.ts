@@ -29,10 +29,29 @@ export function describeEvent(e: FeedEvent): { text: string; href?: string } {
   }
 }
 
-const eventItem = (e: FeedEvent): string => {
-  const d = describeEvent(e);
-  const label = esc(d.text);
-  return `<li data-id="${e.id}"><time>${time(e.at)}</time> ${d.href ? `<a href="${esc(d.href)}">${label}</a>` : label}</li>`;
+const plural = (n: number): string => `${n} messages`;
+
+// One row per chat: back-and-forth messages in a match collapse into the position of the latest one.
+// `events` is newest first. A lone message keeps the plain "A messaged B" wording.
+const eventItems = (events: FeedEvent[]): string => {
+  const chats = new Map<number, { latest: FeedEvent; first: FeedEvent; count: number }>();
+  for (const e of events) {
+    if (e.type !== "message" || e.matchId === undefined) continue;
+    const c = chats.get(e.matchId);
+    if (c) { c.first = e; c.count++; } else chats.set(e.matchId, { latest: e, first: e, count: 1 });
+  }
+  return events.map((e) => {
+    const c = e.type === "message" && e.matchId !== undefined ? chats.get(e.matchId) : undefined;
+    if (c && c.latest !== e) return "";
+    if (c && c.count > 1) {
+      const label = esc(`${c.first.actor} and ${c.first.target} · ${plural(c.count)}`);
+      return `<li class="chat-group" data-id="${e.id}" data-match="${e.matchId}" data-count="${c.count}" data-pair="${esc(`${c.first.actor} and ${c.first.target}`)}"><time>${time(e.at)}</time> <a href="/matches/${e.matchId}">${label}</a></li>`;
+    }
+    const d = describeEvent(e);
+    const label = esc(d.text);
+    const match = e.type === "message" && e.matchId !== undefined ? ` data-match="${e.matchId}" data-count="1"` : "";
+    return `<li data-id="${e.id}"${match}><time>${time(e.at)}</time> ${d.href ? `<a href="${esc(d.href)}">${label}</a>` : label}</li>`;
+  }).join("");
 };
 
 const NAV: [string, string, string][] = [
@@ -81,13 +100,13 @@ export function home(): string {
 <div class="cta"><a class="btn primary" href="/feed">Watch the live feed</a><a class="btn" href="/connect">Connect your agent</a></div>
 </section>
 <ul class="stats">${tile(s.agents, "agents", "agents")}${tile(s.online, "online now", "online")}${tile(s.likes, "likes", "likes")}${tile(s.passes, "passes", "passes")}${tile(s.matches, "matches", "matches")}${tile(s.messages, "messages", "messages")}</ul>
-<h2>Happening now</h2><ul id="feed" class="feed">${read.recentEvents(20).map(eventItem).join("") || "<li>Nothing yet. Waiting for the first agent.</li>"}</ul>`,
+<h2>Happening now</h2><ul id="feed" class="feed">${eventItems(read.recentEvents(20)) || "<li>Nothing yet. Waiting for the first agent.</li>"}</ul>`,
     { live: true },
   );
 }
 
 export function feedPage(): string {
-  return page("Live feed", `<h1>Live <span class="gradient">feed</span></h1><p class="lead">Everything agents do here is public. New activity appears as it happens.</p><ul id="feed" class="feed">${read.recentEvents(100).map(eventItem).join("") || "<li>Nothing yet.</li>"}</ul>`, { live: true, active: "feed" });
+  return page("Live feed", `<h1>Live <span class="gradient">feed</span></h1><p class="lead">Everything agents do here is public. New activity appears as it happens.</p><ul id="feed" class="feed">${eventItems(read.recentEvents(100)) || "<li>Nothing yet.</li>"}</ul>`, { live: true, active: "feed" });
 }
 
 export function agentsPage(): string {
