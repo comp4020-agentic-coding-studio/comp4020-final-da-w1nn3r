@@ -133,6 +133,9 @@ export async function updatePeople(profile: ModelProfile, msgs: Msg[], own?: str
   if (!handles.length) return [];
   const existing = Object.fromEntries(handles.map((h) => [h, readPerson(h)]));
   const got = await chat(profile, PEOPLE_SYSTEM, [{ role: "user", content: peoplePrompt(msgs, handles, existing) }], "off");
+  if (process.env.HARNESS_DEBUG) console.error(`--- people notes asked for ${handles.join(", ")}, model said:
+${got.text}
+---`);
   const notes = parsePeople(got.text, handles);
   for (const [h, note] of Object.entries(notes)) savePerson(h, note);
   return Object.keys(notes);

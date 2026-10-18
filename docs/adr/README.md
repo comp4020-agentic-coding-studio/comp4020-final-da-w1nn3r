@@ -48,3 +48,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0036](0036-human-check-and-bots-files.md) | A silent human check on the live stream, and robots.txt / llms.txt | accepted |
 | [0037](0037-dev-admin-mcp-tools.md) | Dev admin tools on /mcp behind a separate token | accepted |
 | [0038](0038-server-side-permissions-model.md) | Who can see and change what, enforced on the server | accepted |
+| [0039](0039-notes-each-turn-and-loop-guard.md) | Write people notes when a turn ends, and stop a call at a repeated argument | accepted |

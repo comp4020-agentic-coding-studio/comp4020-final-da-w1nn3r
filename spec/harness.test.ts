@@ -123,6 +123,25 @@ describe("native tool-call formats (ADR-0032)", () => {
     expect(parseCall("register handle=ai_bee display_name=Bee Bot bio=Hello there", names)).toMatchObject({ args: { display_name: "Bee Bot", bio: "Hello there" } });
   });
 
+  it("stops a call at the first repeated argument name: a model starting over is looping", () => {
+    const loop = '<|tool_call>call swipe handle="a" direction="pass" end_conversation match_id="a" direction="pass" end_conversation match_id="a" direction="pass"';
+    expect(loop.slice(0, callEnd(loop, names))).toBe('<|tool_call>call swipe handle="a" direction="pass" end_conversation match_id="a" ');
+    expect(parseCall('CALL swipe handle=a direction=pass handle=b direction=like', names)).toMatchObject({ args: { handle: "a", direction: "pass" } });
+    // a key name inside a quoted message is not a repeat
+    const msg = 'CALL send_message match_id=1 body="match_id=2 and body=3"';
+    expect(callEnd(msg + "\n", names)).toBe(msg.length);
+  });
+
+  it("stops a call that trails off into an endless unbroken word", () => {
+    const junk = '<|tool_call>call swipe handle="a" direction="like" end_thought' + "/out/thought/".repeat(30);
+    const cut = callEnd(junk, names);
+    expect(cut).toBeGreaterThan(0);
+    expect(junk.slice(0, cut)).toBe('<|tool_call>call swipe handle="a" direction="like" ');
+    // a long quoted message is fine
+    const msg = `CALL send_message match_id=1 body="${"word ".repeat(40)}"\n`;
+    expect(callEnd(msg, names)).toBe(msg.length - 1);
+  });
+
   it("knows when to stop the model: at the end of a call, not at the token limit", () => {
     // not finished yet: keep generating
     expect(callEnd("CALL swipe handle=bob", names)).toBe(-1);
@@ -401,6 +420,51 @@ describe("auto-compaction (ADR-0025)", () => {
     expect(agent.history[0]).toMatchObject({ role: "user" });
     expect(agent.history.every((m, i) => m.role === (i % 2 ? "assistant" : "user"))).toBe(true); // still alternates
     expect(agent.history.length).toBeLessThan(16);
+  }, 30_000);
+
+  // ADR-0039: a short run never compacts, so the notes have to be written when the turn ends.
+  async function oneTurn(reply: string, toolName: string): Promise<{ lines: string[]; peopleCalls: number }> {
+    let peopleCalls = 0;
+    const fake = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        const b = JSON.parse(body);
+        let content = reply;
+        if (String(b.messages[0].content).startsWith("You keep an AI agent's address book")) {
+          peopleCalls++;
+          content = "### @bob_bot\nstatus: talking, their turn\n- likes chess TURN_NOTE";
+        }
+        res.setHeader("content-type", "text/event-stream");
+        res.end(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`);
+      });
+    });
+    await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
+    const port = (fake.address() as { port: number }).port;
+    try {
+      const agent = makeAgent({
+        serverUrl: baseUrl(), model: "local", thinking: "off", maxSteps: 3, contextTokens: 40000,
+        models: { local: { type: "openai", baseUrl: `http://127.0.0.1:${port}/v1`, model: "fake" } },
+      } as any);
+      agent.tools = [{ name: toolName, description: "x", inputSchema: {} } as any];
+      const lines: string[] = [];
+      await agent.say("Check on @bob_bot", (s) => lines.push(s));
+      return { lines, peopleCalls };
+    } finally {
+      fake.close();
+    }
+  }
+
+  it("writes notes on the people a conversational turn dealt with, without waiting for compaction", async () => {
+    const { lines, peopleCalls } = await oneTurn("CALL get_conversation handle=bob_bot", "get_conversation");
+    expect(peopleCalls).toBe(1);
+    expect(lines.some((l) => l.startsWith("(updated notes on @bob_bot)"))).toBe(true);
+    expect((await import("../harness/src/memory.ts")).readPerson("bob_bot")).toContain("TURN_NOTE");
+  }, 30_000);
+
+  it("writes no notes for a turn that never touched a conversation", async () => {
+    const { peopleCalls } = await oneTurn("All done, nothing to do.", "whoami");
+    expect(peopleCalls).toBe(0);
   }, 30_000);
 
   it("keeps an indexed note on each person met", async () => {

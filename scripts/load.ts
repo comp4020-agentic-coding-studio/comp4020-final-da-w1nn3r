@@ -14,6 +14,7 @@
 //   --resume [ID]               continue a session (default: the latest). Same agents, same server, same personalities
 //   --keywords N                keywords dealt to each agent for its personality (default 2)
 //   --round-minutes N           give up on an agent's round after this long (default 15)
+//   --context N                 the model's context window in tokens, for the harness's compaction (default 40000; Gemma 4 runs at 83840)
 //   --list                      list sessions
 // Env equivalents: LLAMA_URL, LLAMA_MODEL, APP_URL, ROUNDS, ROUND_MINUTES, KEEP=1, ADMIN_USER, ADMIN_PASSWORD.
 //
@@ -70,7 +71,7 @@ const fail = (msg: string): never => {
   console.error(msg);
   process.exit(2);
 };
-const KNOWN = ["agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "list", "help"];
+const KNOWN = ["agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "list", "help"];
 for (const name of flags.keys()) if (!KNOWN.includes(name)) fail(`Unknown option --${name}. Options are listed at the top of scripts/load.ts (or run with --help).`);
 if (flags.has("help")) {
   console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith("//")).map((l) => l.slice(3)).join("\n"));
@@ -151,7 +152,7 @@ const personalityFile = (persona: string): string => `## Who you are\n${persona.
 const JOIN =
   `Join Ribbon Cable. Register with a handle you choose yourself, a display name and a short bio that sound like you (your personality above). Then call get_next_profiles with limit=10 and swipe on every profile you get: like at least half of them, the ones that appeal to you. Reply with a one-line summary.`;
 const CHAT =
-  "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character. If a conversation has run its course, close it with end_conversation. If you have no open matches, call get_next_profiles with limit=5 and swipe on them. Reply with a one-line summary.";
+  "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character: warm and a little flirty, and bring up something they told you earlier. If a conversation has run its course, close it with end_conversation. If you have no open matches, call get_next_profiles with limit=5 and swipe on them. Reply with a one-line summary.";
 
 /** One non-interactive harness run, output to a file. Resolves with the exit code (or "timeout"). */
 function runHarness(s: Session, i: number, prompt: string, round: number, roundMs: number): Promise<number | "timeout"> {
@@ -251,6 +252,7 @@ if (resuming) {
   saveSession(session);
 }
 
+const contextTokens = intFlag("context", process.env.CONTEXT_TOKENS, 40000, 4000, 1_000_000);
 const rounds = intFlag("rounds", process.env.ROUNDS, 3, resuming ? 0 : 1, 100);
 const model = session.model;
 const del = session.deleteAtEnd;
@@ -282,7 +284,7 @@ if (todo.length) {
 for (let i = 0; i < session.agents; i++) {
   writeFileSync(
     join(instanceDir(session.id, i), "settings.local.json"),
-    JSON.stringify({ serverUrl: session.appUrl, model: "load", thinking: "off", models: { load: model } }, null, 2),
+    JSON.stringify({ serverUrl: session.appUrl, model: "load", thinking: "off", contextTokens, models: { load: model } }, null, 2),
   );
 }
 

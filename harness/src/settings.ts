@@ -37,6 +37,8 @@ export interface Settings {
     /** Name of a profile in `models` to write the summaries (default: the model in use). */
     model?: string;
   };
+  /** Write notes on the people a turn dealt with when it ends, not only at compaction (ADR-0039). Default on. */
+  notesEachTurn?: boolean;
   /** auto mode: seconds between checks for unanswered messages and new matches */
   autoSeconds?: number;
   models: Record<string, ModelProfile>;

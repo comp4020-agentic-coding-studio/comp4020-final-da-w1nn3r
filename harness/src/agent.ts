@@ -127,6 +127,7 @@ function parseTail(name: string, tail: string, line: string): Call | "malformed"
     const eq = w.indexOf("=");
     if (eq > 0 && /^[a-z_][a-z0-9_]*$/i.test(w.slice(0, eq))) {
       if (last) args[last] = args[last].replace(/,+$/, ""); // models like `a=1, b=2`
+      if (w.slice(0, eq) in args) break; // a key twice is a model starting over or looping: the call ended before it
       last = w.slice(0, eq);
       args[last] = w.slice(eq + 1);
       lastQuoted = quoted;
@@ -191,6 +192,45 @@ const looping = (text: string): boolean => {
 };
 const MAX_CALL_CHARS = 3000;
 
+/** Where an unquoted word longer than `max` characters starts, or -1: junk such as `end_thought/out/thought//out/...` growing without end. */
+export function longWordAt(text: string, max = 60): number {
+  let quote = "";
+  let start = -1;
+  for (let i = 0; i <= text.length; i++) {
+    const ch = text[i] ?? " ";
+    if (quote) {
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    if (/\s/.test(ch)) start = -1;
+    else if (start < 0) start = i;
+    else if (i - start > max) return start;
+  }
+  return -1;
+}
+
+/** Where an argument name (`key=`) appears for the second time in a call, outside quotes, or -1. A model that does this is repeating itself. */
+export function repeatedKeyAt(text: string): number {
+  const seen = new Set<string>();
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (/[a-z_]/i.test(ch) && (i === 0 || /[\s,]/.test(text[i - 1]))) {
+      const key = /^[a-z_][a-z0-9_]*(?==)/i.exec(text.slice(i))?.[0];
+      if (key) {
+        if (seen.has(key)) return i;
+        seen.add(key);
+        i += key.length;
+      }
+    }
+  }
+  return -1;
+}
+
 /**
  * Where the first tool call in streamed `text` is finished, or -1 while it is still being written. The agent stops
  * the model there: everything after a call is invented, and a model that repeats itself would otherwise run
@@ -203,6 +243,10 @@ export function callEnd(text: string, toolNames: string[]): number {
     const body = text.slice(seg.start).replace(NATIVE_OPEN, "").replace(/^\s+/, "");
     const nl = body.indexOf("\n");
     if (!body.startsWith("{") && nl > 0) return text.length - body.length + nl;
+    const again = body.startsWith("{") ? -1 : repeatedKeyAt(body);
+    if (again > 0) return text.length - body.length + again;
+    const junk = body.startsWith("{") ? -1 : longWordAt(body);
+    if (junk > 0) return text.length - body.length + junk;
     return looping(body) || body.length > MAX_CALL_CHARS ? text.length : -1;
   }
   let offset = 0;
@@ -210,7 +254,13 @@ export function callEnd(text: string, toolNames: string[]): number {
     const end = offset + raw.length;
     const complete = end < text.length; // a newline follows: the model has moved on
     const found = parseLine(raw, toolNames);
-    if (found && found !== "malformed") return complete || looping(raw) || raw.length > MAX_CALL_CHARS ? end : -1;
+    if (found && found !== "malformed") {
+      const again = repeatedKeyAt(raw);
+      if (again > 0) return offset + again;
+      const junk = longWordAt(raw);
+      if (junk > 0) return offset + junk;
+      return complete || looping(raw) || raw.length > MAX_CALL_CHARS ? end : -1;
+    }
     offset = end + 1;
   }
   return -1;
@@ -440,7 +490,33 @@ export function makeAgent(settings: Settings): Agent {
     return (r.isError && !text.startsWith("ERROR") ? "ERROR: " : "") + text.slice(0, MAX_RESULT_CHARS);
   }
 
+  /**
+   * Notes on the people a turn dealt with are written when the turn ends, not only at compaction (ADR-0039): a short
+   * run, or a one-shot `-p` run like the load test's, never reaches the context limit, so its agent would otherwise
+   * start the next run knowing nobody. A failure here never fails the turn.
+   */
+  async function noteTurn(turn: Msg[], out: (s: string) => void): Promise<void> {
+    if (settings.notesEachTurn === false || !turn.length) return;
+    // Only a turn that touched a conversation is worth a note: a swipe-only turn would write one on every profile it glanced at.
+    if (!turn.some((m) => m.role === "assistant" && /(?:send_message|get_conversation|end_conversation)/.test(m.content))) return;
+    try {
+      const names = await updatePeople(activeProfile(settings), turn, getAccount(settings.serverUrl)?.handle);
+        out(names.length ? `(updated notes on ${names.map((n) => "@" + n).join(", ")})` : "(no notes written: no one in this turn, or the model's reply had no usable note)");
+    } catch (err) {
+      out(`! could not update notes on people (${(err as Error).message})`);
+    }
+  }
+
   async function say(text: string, out: (s: string) => void, live?: Live): Promise<void> {
+    const turn: Msg[] = [];
+    try {
+      await run(text, out, live, turn);
+    } finally {
+      await noteTurn(turn, out);
+    }
+  }
+
+  async function run(text: string, out: (s: string) => void, live: Live | undefined, turn: Msg[]): Promise<void> {
     if (!agent.tools.length) await refreshTools();
     agent.history.push({ role: "user", content: text });
     for (let step = 0; step < settings.maxSteps; step++) {
@@ -480,6 +556,7 @@ export function makeAgent(settings: Settings): Agent {
       const at = found ? reply.indexOf(found.line) : -1;
       const kept = found && at >= 0 ? reply.slice(0, at + found.line.length) : reply;
       agent.history.push({ role: "assistant", content: kept || "(no reply)" });
+      turn.push(agent.history[agent.history.length - 1]);
       if (!call) {
         if (!live) out(visible || "(no reply)");
         else if (!visible) out(reasoning ? "(no answer: it used up its token budget thinking; raise maxTokens in settings.json)" : "(no reply)");
@@ -501,6 +578,7 @@ export function makeAgent(settings: Settings): Agent {
         if (visible.split("\n").filter((l) => /^[`>*\- ]*CALL\b/i.test(l.trim())).length > 1) result += "\n(Only your first CALL ran. Do one CALL at a time and wait for RESULT.)";
       }
       agent.history.push({ role: "user", content: `RESULT ${result}` });
+      turn.push(agent.history[agent.history.length - 1]);
     }
     out(`(stopped after ${settings.maxSteps} steps; say "continue" to go on)`);
   }
