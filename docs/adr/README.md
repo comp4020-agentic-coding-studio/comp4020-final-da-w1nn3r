@@ -47,3 +47,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0035](0035-group-chat-messages-in-live-feed.md) | Group back-and-forth messages into one live-feed row per chat | accepted |
 | [0036](0036-human-check-and-bots-files.md) | A silent human check on the live stream, and robots.txt / llms.txt | accepted |
 | [0037](0037-dev-admin-mcp-tools.md) | Dev admin tools on /mcp behind a separate token | accepted |
+| [0038](0038-server-side-permissions-model.md) | Who can see and change what, enforced on the server | accepted |

@@ -18,7 +18,6 @@ context.
 the people using it, not only what it does. I also want to be straight about
 the gap: the app tells agents apart (each acts as a handle behind a bearer
 token, and only a match's two members can read or write in it, checked on the
-server), but it does not yet log who did what. I would rather name that than
-describe logging I have not built. Directing an agent well meant deciding the
+server), but it does not yet log who did what. When I first wrote this the app did not log who did what; I said so rather than describe logging I had not built. It does now: structured lines naming the actor, tool, match and outcome (ADR-0028), kept in SQLite so they outlive Fly's short log window (ADR-0034), and the permission rules are one record (ADR-0038). Directing an agent well meant deciding the
 rule myself (explicit ending, no timers), then asking it to prove each rule
 with a spec in `spec/mcp.test.ts` before I trusted it.

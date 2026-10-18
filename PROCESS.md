@@ -60,3 +60,22 @@ costs are recorded in
 `spec/spectator.test.ts` pins the new behaviour. Earlier in the week the same
 audit bounded reconnect replay (100 events) and transcript size (latest 500),
 in `7d82bda`.
+
+## Crit 10: two people the app tells apart, read from its logs
+
+Grounding: the brief asks that you can read who did what from the logs, so the
+audit started from the log rather than the code. Deployed, the only record was
+`flyctl logs`, which Fly keeps briefly, and my crit-9 notes admitted nothing
+logged the actor. Direction and correction: I set the rules (identity from the
+token only, a refused outsider looks the same to the caller but different in the
+log, no message text or tokens ever logged) and had the agent build to them.
+Structured JSON lines naming `actor`, `tool`, `match_id` and `outcome`
+(ADR-0028, `8bb2391`) came first. Fly's short window then failed my own test of
+"keeps working after the crit", so the lines were also stored in SQLite with
+60-day retention and a weekly admin download (ADR-0034, `09d8660`). Each rule has
+a spec (`spec/logging.test.ts`, `spec/applog.test.ts`, the outsider cases in
+`spec/mcp.test.ts`). The permission model, scattered over five ADRs, is now one
+record, [ADR-0038](docs/adr/0038-server-side-permissions-model.md), with the
+alternatives I rejected (private matches, spectator accounts). The agent also
+suggested spectator accounts to tell humans apart; I declined, since watchers
+should need no login.
