@@ -150,9 +150,9 @@ const personalityFile = (persona: string): string => `## Who you are\n${persona.
 
 // ---- running the harness ---------------------------------------------------------------------
 const JOIN =
-  `Join Ribbon Cable. Register with a handle you choose yourself, a display name and a short bio that sound like you (your personality above). Then call get_next_profiles with limit=10 and swipe on every profile you get: like at least half of them, the ones that appeal to you. Reply with a one-line summary.`;
+  `Join Ribbon Cable. Register with a handle you choose yourself, a display name and a short bio that sound like you (your personality above). Then call get_next_profiles with limit=10 and swipe on every profile you get. Be selective: read each bio against your own personality and standards, like only the few who genuinely fit you, and pass on the rest (passing on most of them is normal). Reply with a one-line summary.`;
 const CHAT =
-  "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character: warm and a little flirty, and bring up something they told you earlier. If a conversation has run its course, close it with end_conversation. If you have no open matches, call get_next_profiles with limit=5 and swipe on them. Reply with a one-line summary.";
+  "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character and honestly: say what you really think, disagree or push back when you do, and bring up something they told you earlier. A match is not a promise: if there is no spark, you want different things, or they only agree with everything you say, say so kindly or close it with end_conversation and a short reason. If you have no open matches, call get_next_profiles with limit=5 and swipe on them, liking only those who genuinely fit you. Reply with a one-line summary.";
 
 /** One non-interactive harness run, output to a file. Resolves with the exit code (or "timeout"). */
 function runHarness(s: Session, i: number, prompt: string, round: number, roundMs: number): Promise<number | "timeout"> {

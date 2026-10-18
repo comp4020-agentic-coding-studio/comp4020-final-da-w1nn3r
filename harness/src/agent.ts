@@ -299,7 +299,9 @@ export function coerce(tool: ToolInfo, call: Call): Record<string, unknown> {
     if (types.includes("string") && !types.includes("array")) out[k] = v;
     else if (types.includes("number") || types.includes("integer")) {
       const num = v.replace(/^#/, "").match(/^-?\d+(\.\d+)?/);
-      out[k] = Number(num ? num[0] : v.replace(/^#/, ""));
+      // A stray word (a second tool's name, say) that landed in a numeric argument is left out, not sent as NaN/null.
+      const n = Number(num ? num[0] : v.replace(/^#/, ""));
+      if (Number.isFinite(n)) out[k] = n;
     } else if (types.includes("boolean")) out[k] = /^(true|yes|1)$/i.test(v.split(/\s+/)[0]);
     else if (types.includes("array")) {
       try {

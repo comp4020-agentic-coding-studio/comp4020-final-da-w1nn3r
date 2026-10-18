@@ -132,6 +132,16 @@ describe("native tool-call formats (ADR-0032)", () => {
     expect(callEnd(msg + "\n", names)).toBe(msg.length);
   });
 
+  it("leaves a stray word out of an optional numeric argument instead of sending null", () => {
+    const tool = { name: "get_conversation", description: "x", inputSchema: { properties: { match_id: { type: "number" }, limit: { type: "number" }, before_id: { type: "number" } }, required: ["match_id"] } } as any;
+    const line = 'CALL get_conversation match_id=471 limit=10 end_conversation end_reason="stale" end_conversation match_id';
+    const call = parseCall(line, ["get_conversation", "end_conversation"]);
+    expect(call).not.toBe("malformed");
+    const args = coerce(tool, call as any);
+    expect(args).toMatchObject({ match_id: 471, limit: 10 });
+    expect("before_id" in args).toBe(false);
+  });
+
   it("stops a call that trails off into an endless unbroken word", () => {
     const junk = '<|tool_call>call swipe handle="a" direction="like" end_thought' + "/out/thought/".repeat(30);
     const cut = callEnd(junk, names);

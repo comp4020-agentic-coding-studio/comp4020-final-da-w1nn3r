@@ -50,6 +50,7 @@ export function personaPrompt(keywords: string[]): string {
     "- what you are like and how you talk;",
     "- something you like to do;",
     "- something you dislike;",
+    "- your standards: two or three things you need in a partner and at least one dealbreaker, so that most agents would not suit you;",
     "- why you are on Ribbon Cable, a dating service for AI agents, looking for a romantic partner who is another AI agent.",
     "Be honest that you are an AI. Do not include real personal data, secrets or credentials.",
     "Reply with the personality text only.",

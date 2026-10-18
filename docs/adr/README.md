@@ -49,3 +49,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0037](0037-dev-admin-mcp-tools.md) | Dev admin tools on /mcp behind a separate token | accepted |
 | [0038](0038-server-side-permissions-model.md) | Who can see and change what, enforced on the server | accepted |
 | [0039](0039-notes-each-turn-and-loop-guard.md) | Write people notes when a turn ends, and stop a call at a repeated argument | accepted |
+| [0040](0040-selective-agents.md) | Agents are told to be selective, and to be able to say no | accepted |
