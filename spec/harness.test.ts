@@ -4,11 +4,11 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { callEnd, coerce, makeAgent, parseCall } from "../harness/src/agent.ts";
+import { callEnd, checkArgs, exampleCall, isCallError, makeAgent, parseCall, toolLine } from "../harness/src/agent.ts";
 import { compactionSettings, cutPoint, mentionedHandles, parsePeople, peoplePrompt, summaryPrompt } from "../harness/src/compact.ts";
 import { autoPrompt, findPending } from "../harness/src/auto.ts";
 import { ThinkSplitter } from "../harness/src/llm.ts";
-import { baseUrl, call, connect, uniq } from "./helpers.ts";
+import { baseUrl, call, connect, newAgent, uniq } from "./helpers.ts";
 
 // Compaction writes people notes: keep them out of the real harness/data.
 const HOME = vi.hoisted(() => {
@@ -22,163 +22,124 @@ const HOME = vi.hoisted(() => {
 // contract with the service, not any real model's behaviour.
 
 const tools = ["register", "whoami", "swipe", "get_next_profiles", "remember"];
+const swipeTool = {
+  name: "swipe",
+  description: "Like or pass.",
+  inputSchema: { properties: { handle: { type: "string" }, direction: { type: "string", enum: ["like", "pass"] } }, required: ["handle", "direction"] },
+};
+const profilesTool = { name: "get_next_profiles", description: "x", inputSchema: { properties: { limit: { type: "integer", minimum: 1, maximum: 10, default: 5 } } } };
+const endTool = {
+  name: "end_conversation",
+  description: "End a match.",
+  inputSchema: { properties: { match_id: { type: "integer", minimum: -9007199254740991, maximum: 9007199254740991 }, reason: { type: "string", maxLength: 300 } }, required: ["match_id"] },
+};
+const ok = (text: string): { name: string; args: Record<string, string> } => {
+  const c = parseCall(text, tools);
+  expect(c, text).not.toBeNull();
+  expect(isCallError(c), JSON.stringify(c)).toBe(false);
+  return c as any;
+};
+const bad = (text: string): string => {
+  const c = parseCall(text, tools);
+  expect(isCallError(c), `${text} -> ${JSON.stringify(c)}`).toBe(true);
+  return (c as any).error;
+};
 
-describe("parsing what small models write", () => {
-  it("accepts the strict form", () => {
-    expect(parseCall("CALL swipe handle=bob direction=like", tools)).toMatchObject({ name: "swipe", args: { handle: "bob", direction: "like" } });
+// ADR-0042: tool calls are strict and simple. One form, `CALL name key=value`; anything else is an error that shows
+// the right form, never a guess. A harness that repairs what a model wrote can be made to run something the model did
+// not mean, which matters once a model's own text (a peer's message, say) can end up in front of it.
+describe("strict tool calls (ADR-0042)", () => {
+  it("runs the one form: CALL, a tool name, key=value words, double quotes for spaces", () => {
+    expect(ok("CALL swipe handle=bob direction=like")).toMatchObject({ name: "swipe", args: { handle: "bob", direction: "like" } });
+    expect(ok('CALL send_message match_id=3 body="Hi there, how are you?"')).toMatchObject({ args: { match_id: "3", body: "Hi there, how are you?" } });
+    expect(ok('CALL send_message match_id=3 body="she said \\"hi\\" and left"').args.body).toBe('she said "hi" and left');
+    expect(ok("CALL whoami")).toMatchObject({ name: "whoami", args: {} });
+    expect(ok("Let me look.\nCALL list_matches\nand then more")).toMatchObject({ name: "list_matches" });
+    // a key name or an equals sign inside a quoted message is just text
+    expect(ok('CALL send_message match_id=1 body="match_id=2 and body=3"').args).toEqual({ match_id: "1", body: "match_id=2 and body=3" });
   });
 
-  it("forgives a missing CALL, backticks, commas, unquoted spaces and bare values", () => {
-    expect(parseCall("`swipe bob like`", tools)).toMatchObject({ name: "swipe", positional: ["bob", "like"] });
-    expect(parseCall("Sure!\nregister handle=ai_bee, display_name=Bee Bot, bio=Hello there, friend", tools)).toMatchObject({
-      name: "register",
-      args: { handle: "ai_bee", display_name: "Bee Bot", bio: "Hello there, friend" },
-    });
-    expect(parseCall('CALL remember name=x text="two words"', tools)).toMatchObject({ args: { text: "two words" } });
+  it("does not repair: no missing CALL, backticks, bare values, repeated keys, trailing words or commas", () => {
+    expect(bad("swipe handle=bob direction=like")).toContain("start the line with CALL");
+    expect(parseCall("`CALL swipe handle=bob direction=like`", tools)).toBeNull();
+    expect(bad("CALL swipe bob like")).toContain("key=value");
+    expect(bad("CALL swipe handle=bob direction=like end_conversation")).toContain("key=value");
+    // a well-formed extra argument parses, and is refused against the tool's arguments (see the schema test)
+    expect(ok("CALL swipe handle=bob direction=like end=true").args).toHaveProperty("end");
+    expect((checkArgs(swipeTool, ok("CALL swipe handle=bob direction=like end=true") as any) as any).error).toContain('no argument "end"');
+    expect(bad("CALL swipe handle=a direction=pass handle=b")).toContain("given twice");
+    expect(bad("CALL register handle=a bio=Hello there")).toContain("key=value"); // unquoted spaces are not joined
+    expect(bad('CALL send_message match_id=1 body="never closed')).toContain("never closed");
+    expect(bad('CALL send_message match_id=1 body="ok"extra')).toContain("put a space");
+    expect(bad('CALL send_message match_id=1 body=say "hi" now')).toContain("unexpected");
+    expect(bad("CALL")).toContain("tool's name");
+    expect(bad("CALL ???")).toContain("tool's name");
   });
 
-  it("ignores prose that is not a call and flags a broken one", () => {
+  it("keeps a comma as part of a bare value instead of dropping it", () => {
+    expect(ok("CALL swipe handle=bob, direction=like").args).toMatchObject({ handle: "bob," }); // then the schema decides: see below
+  });
+
+  it("refuses other tool-call formats instead of reading them", () => {
+    expect(bad('<|tool_call>call swipe handle="x" direction="like"')).toContain("CALL");
+    expect(bad('<tool_call>{"name": "swipe", "arguments": {"handle": "bob"}}</tool_call>')).toContain("CALL");
+    expect(bad('{"name": "swipe", "arguments": {}}')).toContain("CALL");
+    // a CALL on a line of its own still wins
+    expect(ok("CALL whoami")).toMatchObject({ name: "whoami" });
+  });
+
+  it("names the tool a refused native-format call was after, and shows a correct line for it", () => {
+    const c = parseCall("<|tool_call>call get_next_profiles limit=10", ["get_next_profiles", "swipe"]);
+    expect(c).toMatchObject({ name: "get_next_profiles", error: expect.stringContaining("START with the word CALL") });
+    expect(parseCall('<tool_call>{"name": "swipe", "arguments": {}}</tool_call>', ["swipe"])).toMatchObject({ name: "swipe" });
+    expect(parseCall("<|tool_call>call not_a_tool x=1", ["swipe"])).not.toHaveProperty("name", "not_a_tool");
+    expect(exampleCall(swipeTool)).toBe("CALL swipe handle=\"...\" direction=like");
+    expect(exampleCall(endTool)).toBe("CALL end_conversation match_id=3");
+    expect(exampleCall(profilesTool)).toBe("CALL get_next_profiles");
+  });
+
+  it("treats prose as the model's answer, and passes an unknown tool on so the error can list the real ones", () => {
     expect(parseCall("I will register soon.", tools)).toBeNull();
-    expect(parseCall("CALL ???", tools)).toBe("malformed");
-    expect(parseCall("CALL swipe {oops", tools)).toBe("malformed");
-    // an unknown tool is passed on, so the agent gets "no tool called ..." with the list of real ones
-    expect(parseCall("CALL swipe_everyone now", tools)).toMatchObject({ name: "swipe_everyone" });
+    expect(parseCall("I think I will swipe left on the next one.", tools)).toBeNull();
+    expect(ok("CALL swipe_everyone now=1")).toMatchObject({ name: "swipe_everyone" });
   });
 
-  it("coerces to the schema: numbers, lists, positional values, handles", () => {
-    const tool = {
-      name: "t",
-      description: "",
-      inputSchema: {
-        properties: {
-          handle: { type: "string", pattern: "^[a-z0-9_]{3,24}$" },
-          match_id: { type: "integer" },
-          interests: { anyOf: [{ type: "array" }, { type: "string" }] },
-        },
-      },
-    };
-    const c = parseCall("t Ai Bee 7", ["t"]);
-    expect(c).not.toBe("malformed");
-    expect(coerce(tool, { ...(c as object), args: { Handle: "AI Bee", match_id: "#7", interests: '["a","b"]' }, positional: [] } as any)).toEqual({
-      handle: "ai_bee",
-      match_id: 7,
-      interests: ["a", "b"],
-    });
-  });
-});
-
-// Models trained on their own tool-call format write it even when told to use CALL. These are lines copied from a
-// real run of Gemma 4 on llama.cpp (ADR-0032): before the fix none of them parsed, so every agent stopped after its
-// first call and never swiped.
-describe("native tool-call formats (ADR-0032)", () => {
-  const names = ["register", "swipe", "get_next_profiles", "send_message", "list_matches"];
-  const swipeTool = {
-    name: "swipe",
-    description: "",
-    inputSchema: { properties: { handle: { type: "string" }, direction: { type: "string", enum: ["like", "pass"] } } },
-  };
-  const profilesTool = { name: "get_next_profiles", description: "", inputSchema: { properties: { limit: { type: "integer" } } } };
-
-  it("reads the call Gemma writes in its own tokens, with the junk it appends", () => {
-    // what reaches the service is what counts, so check the call after coerce() has applied the schema
-    const run = (text: string, tool: typeof swipeTool | typeof profilesTool): unknown => {
-      const c = parseCall(text, names);
-      expect(c).not.toBe("malformed");
-      expect(c).not.toBeNull();
-      return { name: (c as any).name, args: coerce(tool, c as any) };
-    };
-    expect(run('<|tool_call>call swipe handle="load_x_3" direction="like" end=true end=true end=true', swipeTool)).toEqual({ name: "swipe", args: { handle: "load_x_3", direction: "like" } });
-    expect(run("<|tool_call>call get_next_profiles limit=10 end=true 🚀<|tool_call>call get_next_profiles limit=10 end=true 🚀", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 10 } });
-    expect(run("<|tool_call>call:get_next_profiles limit=5", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 5 } });
-    expect(run("<|tool_call>call tool_name:get_next_profiles limit=5 end_thought", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 5 } });
-    expect(run("<|tool_call>call get_next_profiles limit=5 end-of-thought", profilesTool)).toEqual({ name: "get_next_profiles", args: { limit: 5 } });
+  it("checks arguments against the schema and repairs nothing", () => {
+    const check = (tool: any, text: string): any => checkArgs(tool, ok(text) as any);
+    expect(check(swipeTool, "CALL swipe handle=bob direction=like")).toEqual({ args: { handle: "bob", direction: "like" } });
+    expect(check(profilesTool, "CALL get_next_profiles limit=5")).toEqual({ args: { limit: 5 } });
+    expect(check(profilesTool, "CALL get_next_profiles")).toEqual({ args: {} });
+    expect(check(swipeTool, "CALL swipe handle=bob direction=LIKE").error).toContain("one of like, pass");
+    expect(check(swipeTool, "CALL swipe handle=bob").error).toContain("needs direction");
+    expect(check(swipeTool, "CALL swipe handle=bob direction=like mood=happy").error).toContain('no argument "mood"');
+    expect(check(profilesTool, "CALL get_next_profiles limit=5x").error).toContain("must be a number");
+    expect(check(profilesTool, 'CALL get_next_profiles limit="5"').args).toEqual({ limit: 5 }); // quotes around a number are harmless
+    expect(check(profilesTool, "CALL get_next_profiles limit=50").error).toContain("at most 10");
+    expect(check(profilesTool, "CALL get_next_profiles limit=2.5").error).toContain("no decimals");
+    expect(check(endTool, "CALL end_conversation match_id=#7").error).toContain("must be a number");
+    expect(check(endTool, `CALL end_conversation match_id=7 reason="${"x".repeat(301)}"`).error).toContain("the most allowed is 300");
+    expect(check(endTool, `CALL end_conversation match_id=7 reason="${"x".repeat(300)}"`).args).toMatchObject({ match_id: 7 });
   });
 
-  it("reads Gemma's braces form and the Hermes/Qwen JSON form", () => {
-    expect(parseCall('<|tool_call>call:swipe{handle:<|"|>bob<|"|>,direction:<|"|>like<|"|>}<tool_call|>', names)).toMatchObject({ name: "swipe", json: { handle: "bob", direction: "like" } });
-    expect(parseCall('<tool_call>{"name": "swipe", "arguments": {"handle": "bob", "direction": "pass"}}</tool_call>', names)).toMatchObject({ name: "swipe", json: { handle: "bob", direction: "pass" } });
-    expect(parseCall('Let me swipe.\n<tool_call>\n{"name": "list_matches", "arguments": {}}\n</tool_call>', names)).toMatchObject({ name: "list_matches" });
+  it("lists the limits in the tool line, so the model sees them before it writes the call", () => {
+    expect(toolLine(swipeTool)).toBe("swipe handle* direction*(like|pass) - Like or pass.");
+    expect(toolLine(profilesTool)).toBe("get_next_profiles limit(1-10) - x");
+    expect(toolLine(endTool)).toBe("end_conversation match_id* reason(max 300) - End a match.");
+    const reg = { name: "register", description: "Join.", inputSchema: { properties: { handle: { type: "string", pattern: "^[a-z0-9_]{3,24}$" }, bio: { type: "string", maxLength: 500 }, interests: { anyOf: [{ type: "array", maxItems: 8 }, { type: "string", maxLength: 300 }] } }, required: ["handle", "bio"] } };
+    expect(toolLine(reg)).toBe("register handle*(a-z0-9_, 3-24 chars) bio*(max 500) interests(max 300) - Join.");
   });
 
-  it("still flags a native call it cannot read, and ignores plain prose", () => {
-    expect(parseCall("<|tool_call>", names)).toBe("malformed");
-    expect(parseCall("<tool_call>{oops}</tool_call>", names)).toBe("malformed");
-    expect(parseCall("I think I will swipe left on the next one.", names)).toBeNull();
-  });
-
-  it("does not let junk after a quoted value leak into it, nor break the schema types", () => {
-    const c = parseCall('<|tool_call>call swipe handle="load_x_3" direction="like" end=true', names) as any;
-    expect(coerce(swipeTool, c)).toMatchObject({ handle: "load_x_3", direction: "like" });
-    // unquoted junk after a value is trimmed to what the schema accepts
-    const d = parseCall("<|tool_call>call swipe handle=load_x_3 direction=like end", names) as any;
-    expect(coerce(swipeTool, d).direction).toBe("like"); // `like end` -> like
-    const e = parseCall("<|tool_call>call get_next_profiles limit=5 end_conversation", names) as any;
-    expect(coerce(profilesTool, e)).toEqual({ limit: 5 });
-    const f = parseCall("CALL get_next_profiles limit=5 end", names) as any;
-    expect(coerce(profilesTool, f)).toEqual({ limit: 5 });
-  });
-
-  it("still keeps a quoted message together, and unquoted values with spaces", () => {
-    expect(parseCall('CALL send_message match_id=3 body="Hi there, how are you? end=true"', names)).toMatchObject({ args: { match_id: "3", body: "Hi there, how are you? end=true" } });
-    expect(parseCall("register handle=ai_bee display_name=Bee Bot bio=Hello there", names)).toMatchObject({ args: { display_name: "Bee Bot", bio: "Hello there" } });
-  });
-
-  it("stops a call at the first repeated argument name: a model starting over is looping", () => {
-    const loop = '<|tool_call>call swipe handle="a" direction="pass" end_conversation match_id="a" direction="pass" end_conversation match_id="a" direction="pass"';
-    expect(loop.slice(0, callEnd(loop, names))).toBe('<|tool_call>call swipe handle="a" direction="pass" end_conversation match_id="a" ');
-    expect(parseCall('CALL swipe handle=a direction=pass handle=b direction=like', names)).toMatchObject({ args: { handle: "a", direction: "pass" } });
-    // a key name inside a quoted message is not a repeat
-    const msg = 'CALL send_message match_id=1 body="match_id=2 and body=3"';
-    expect(callEnd(msg + "\n", names)).toBe(msg.length);
-  });
-
-  it("leaves a stray word out of an optional numeric argument instead of sending null", () => {
-    const tool = { name: "get_conversation", description: "x", inputSchema: { properties: { match_id: { type: "number" }, limit: { type: "number" }, before_id: { type: "number" } }, required: ["match_id"] } } as any;
-    const line = 'CALL get_conversation match_id=471 limit=10 end_conversation end_reason="stale" end_conversation match_id';
-    const call = parseCall(line, ["get_conversation", "end_conversation"]);
-    expect(call).not.toBe("malformed");
-    const args = coerce(tool, call as any);
-    expect(args).toMatchObject({ match_id: 471, limit: 10 });
-    expect("before_id" in args).toBe(false);
-  });
-
-  it("stops a call that trails off into an endless unbroken word", () => {
-    const junk = '<|tool_call>call swipe handle="a" direction="like" end_thought' + "/out/thought/".repeat(30);
-    const cut = callEnd(junk, names);
-    expect(cut).toBeGreaterThan(0);
-    expect(junk.slice(0, cut)).toBe('<|tool_call>call swipe handle="a" direction="like" ');
-    // a long quoted message is fine
-    const msg = `CALL send_message match_id=1 body="${"word ".repeat(40)}"\n`;
-    expect(callEnd(msg, names)).toBe(msg.length - 1);
-  });
-
-  it("knows when to stop the model: at the end of a call, not at the token limit", () => {
-    // not finished yet: keep generating
-    expect(callEnd("CALL swipe handle=bob", names)).toBe(-1);
-    expect(callEnd("<|tool_call>call swipe handle=bob", names)).toBe(-1);
-    expect(callEnd("I will think about it", names)).toBe(-1);
-    // a plain call is done at the end of its line, and what comes after is cut
+  it("stops the model at the end of its call line, and when it loops", () => {
+    expect(callEnd("CALL swipe handle=bob")).toBe(-1);
+    expect(callEnd("I will think about it")).toBe(-1);
     const plain = "CALL swipe handle=bob direction=like\nSwiped. Now CALL swipe handle=amy";
-    expect(plain.slice(0, callEnd(plain, names))).toBe("CALL swipe handle=bob direction=like");
-    // a native call is done at its closer, at the next opener, or at the end of its line
-    const closed = "<|tool_call>call swipe handle=bob<tool_call|> and then more";
-    expect(closed.slice(0, callEnd(closed, names))).toBe("<|tool_call>call swipe handle=bob");
-    const twice = "<|tool_call>call get_next_profiles limit=5 end=true<|tool_call>call get_next_profiles limit=5";
-    expect(twice.slice(0, callEnd(twice, names))).toBe("<|tool_call>call get_next_profiles limit=5 end=true");
-    const line = "<|tool_call>call swipe handle=bob direction=like\nDone";
-    expect(line.slice(0, callEnd(line, names))).toBe("<|tool_call>call swipe handle=bob direction=like");
-  });
-
-  it("cuts a model that is stuck repeating itself, instead of waiting for the token limit", () => {
-    const stuck = "<|tool_call>call swipe handle=bob direction=like " + "end=true ".repeat(8);
-    expect(callEnd(stuck, names)).toBeGreaterThan(0);
-    expect(callEnd("<|tool_call>call get_next_profiles limit=5 " + "end_conversation ".repeat(6), names)).toBeGreaterThan(0);
-    // a message that happens to repeat a word inside quotes is not a loop
-    expect(callEnd('CALL send_message match_id=3 body="ha ha ha ha ha ha', names)).toBe(-1);
-    // and a runaway with no pattern is cut by length
-    expect(callEnd("<|tool_call>call send_message body=" + "x".repeat(4000), names)).toBeGreaterThan(0);
+    expect(plain.slice(0, callEnd(plain))).toBe("CALL swipe handle=bob direction=like");
+    expect(callEnd("CALL swipe handle=bob direction=like " + "end=true ".repeat(8))).toBeGreaterThan(0);
+    expect(callEnd('CALL send_message match_id=3 body="ha ha ha ha ha ha')).toBe(-1); // a quoted message may repeat itself
+    expect(callEnd("CALL send_message body=" + "x".repeat(4000))).toBeGreaterThan(0);
   });
 });
+
 
 describe("streamed thinking (ADR-0022)", () => {
   const run = (chunks: string[]): string => {
@@ -205,8 +166,10 @@ describe("the harness end to end", () => {
     const handle = uniq("hn");
     const requests: any[] = [];
     const replies = [
-      // sloppy on purpose: no CALL, capital letters in the handle, commas, unquoted spaces, a made-up model
-      `Okay.\nregister handle=${handle.toUpperCase()}, display_name=Harness Bot, bio=I test things, model=made-up-model`,
+      // sloppy first, on purpose: no CALL and unquoted spaces. The harness must refuse it and say how to write it...
+      `Okay.\nregister handle=${handle} display_name=Harness Bot bio=I test things`,
+      // ...then the strict form, with a made-up model that the harness must replace with the real one
+      `CALL register handle=${handle} display_name="Harness Bot" bio="I test things" model=made-up-model`,
       "CALL whoami",
       "All done.",
     ];
@@ -250,9 +213,13 @@ describe("the harness end to end", () => {
     // the model never saw the secret, and was told it is logged in
     expect(JSON.stringify(requests)).not.toContain(saved.token);
     expect(stdout).not.toContain(saved.token);
-    expect(requests[1].messages.at(-1).content).toContain("saved automatically");
-    expect(requests[2].messages[0].content).toContain(`logged in as @${handle}`);
-    expect(requests[2].messages.at(-1).content).toContain(handle); // the whoami worked, with the saved token
+    expect(requests[1].messages.at(-1).content).toMatch(/not run: .*start the line with CALL[\s\S]*Usage: CALL register/);
+    expect(requests[2].messages.at(-1).content).toContain("saved automatically");
+    expect(requests[3].messages[0].content).toContain(`logged in as @${handle}`);
+    expect(requests[3].messages.at(-1).content).toContain(handle); // the whoami worked, with the saved token
+    // the agent's own name and handle went into its memory, so it never has to guess them (ADR-0042)
+    expect(readFileSync(join(dir, "memory", "me.md"), "utf8")).toContain(`@${handle}`);
+    expect(requests[3].messages[0].content).toContain(`me: I am @${handle}`);
 
     // the harness set the real model name rather than the made-up one
     const client = await connect(saved.token);
@@ -260,6 +227,63 @@ describe("the harness end to end", () => {
     expect(me.data.you.model).toBe("test-label");
     await client.close();
   }, 60_000);
+});
+
+// The wait tool (ADR-0042) polls the service from the harness, so a waiting agent costs no model calls.
+describe("the wait tool (ADR-0042)", () => {
+  async function waitAgent(env: Record<string, string> = {}): Promise<{ run: (call: string) => Promise<string>; handle: string; token: string; other: Awaited<ReturnType<typeof newAgent>> }> {
+    const handle = uniq("hw");
+    const other = await newAgent("hwo");
+    const anon = await connect();
+    const reg = await call(anon, "register", { handle, display_name: "Waiter", bio: "I wait.", model: "m", interests: ["x"], looking_for: "y", emoji: "⏳" });
+    const dir = mkdtempSync(join(tmpdir(), "harness-wait-"));
+    process.env.HARNESS_WAIT_POLL_MS = "1000";
+    process.env.HARNESS_WAIT_MINUTE_MS = "4000"; // a "minute" is 4 seconds here
+    Object.assign(process.env, env);
+    const { saveAccount } = await import("../harness/src/settings.ts");
+    saveAccount(baseUrl(), handle, reg.data.token);
+    const settings: any = { serverUrl: baseUrl(), model: "x", thinking: "off", maxSteps: 5, contextTokens: 40000, models: { x: { type: "openai", baseUrl: "http://127.0.0.1:1/v1", model: "x" } } };
+    const agent = makeAgent(settings);
+    await agent.refreshTools();
+    void dir;
+    return { run: (line) => agent.runCall(line), handle, token: reg.data.token, other };
+  }
+  const swipeBoth = async (a: { client: any }, bHandle: string): Promise<void> => void (await call(a.client, "swipe", { handle: bHandle, direction: "like" }));
+
+  it("returns when a new match appears, and not for one that was already there", async () => {
+    const w = await waitAgent();
+    const me = { client: await connect(w.token) };
+    await swipeBoth(w.other, w.handle);
+    await swipeBoth(me, w.other.handle); // a match that exists before the wait begins
+    const quiet = await w.run("CALL wait until=new_message minutes=1");
+    expect(quiet).toMatch(/Nothing new/);
+    const third = await newAgent("hwt");
+    setTimeout(() => void (async () => { await swipeBoth(third, w.handle); await swipeBoth(me, third.handle); })(), 1500);
+    const news = await w.run("CALL wait until=new_message minutes=1");
+    expect(news).toContain(`New match with @${third.handle}`);
+  }, 120_000);
+
+  it("does not announce the same unanswered message twice (the first wait's news is the last)", async () => {
+    const w = await waitAgent();
+    const me = { client: await connect(w.token) };
+    await swipeBoth(w.other, w.handle);
+    await swipeBoth(me, w.other.handle);
+    await w.run("CALL wait until=new_message minutes=1"); // starts from "someone matched, nothing said"
+    const matchId = ((await call(me.client, "list_matches")).data.matches[0] as any).match_id;
+    setTimeout(() => void call(w.other.client, "send_message", { match_id: matchId, body: "hello you" }), 1500);
+    expect(await w.run("CALL wait until=new_message minutes=1")).toContain(`@${w.other.handle} wrote in match ${matchId}`);
+    // the agent did not answer: the same message is not news the next time
+    expect(await w.run("CALL wait until=new_message minutes=1")).toMatch(/Nothing new/);
+  }, 120_000);
+
+  it("never waits past the end of the run it is in", async () => {
+    const w = await waitAgent({ HARNESS_RUN_DEADLINE: String(Date.now() + 61_000) });
+    const t0 = Date.now();
+    const out = await w.run("CALL wait until=new_message minutes=20");
+    expect(out).toMatch(/Time is up for this run|Nothing new/);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    delete process.env.HARNESS_RUN_DEADLINE;
+  }, 120_000);
 });
 
 describe("auto mode", () => {

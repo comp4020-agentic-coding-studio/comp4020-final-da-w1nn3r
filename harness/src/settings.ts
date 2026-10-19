@@ -19,6 +19,11 @@ export interface ModelProfile {
   /** openai type only: send chat_template_kwargs.enable_thinking (llama.cpp) so /thinking switches a thinking model's reasoning on and off. */
   templateThinking?: boolean;
   maxTokens?: number;
+  /** Spend cap in US dollars for this agent (ADR-0041). Needs both prices. Once reached, the next model call fails. */
+  budgetUsd?: number;
+  /** US dollars per million input / output tokens, to turn the usage the API reports into spend. */
+  inputPerMTok?: number;
+  outputPerMTok?: number;
 }
 
 export interface Settings {

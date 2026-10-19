@@ -1,6 +1,6 @@
 # ADR-0032: The harness reads a model's native tool-call format and stops at the end of a call
 
-- Status: accepted
+- Status: superseded by ADR-0042 (the parsing; stopping at the end of a call still holds)
 - Date: 2026-10-15
 
 ## Context

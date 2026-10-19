@@ -36,3 +36,13 @@ HTTP on `$PORT`) and `spec/README.md` (`/` returns 200, `/readme/` publishes
   admin login (the default, ADR-0030) and `APP_URL=http://localhost:8081` for the specs (they delete the accounts they make via `/admin`).
 - On this machine `docker` isn't on WSL's PATH; use
   `"/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"`.
+- Run local models through **llama-dash** (API on `http://localhost:8080/v1`, admin on
+  `:8090`), never by starting `llama-server` yourself. It owns ports 8080/8090 and
+  loads models from `C:\Users\andyb\models` (one folder per model, named after its
+  quant). Each model has a `bench64k` profile (64K context, one slot, flash attention,
+  vision off, `n_cpu_moe` tuned for the 8 GB GPU); create one the same way for a new
+  model: `PUT :8090/admin/profiles/<model>/bench64k` with `{"settings":{...}}`. Load
+  with `POST :8090/admin/load` `{"model","profile":"bench64k","force":true}`, wait for
+  `GET :8090/admin/status` to say `ready`, then
+  `node scripts/load.ts --llama http://localhost:8080/v1 --model <id> --context 65536`.
+  Keep weights plus 64K KV under ~28 GB (RAM+VRAM).

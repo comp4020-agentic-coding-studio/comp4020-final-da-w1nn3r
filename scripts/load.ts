@@ -9,11 +9,14 @@
 //   --server URL                the app under test (default http://localhost:8081; new sessions)
 //   --llama URL                 the llama.cpp server, ending in /v1 (default: find one on the usual local ports)
 //   --model NAME                model name the llama server answers to (default: the first it lists)
+//   --provider anthropic        use Claude (ANTHROPIC_API_KEY, default model claude-haiku-5-5) instead of llama.cpp (ADR-0041)
+//   --budget USD                with --provider anthropic: spend cap per agent in dollars (default 2); --input-price/--output-price override US$/MTok
 //   --rounds N                  rounds to run now (default 3; 0 with --resume just does the cleanup)
 //   --delete | --keep           delete the agents' accounts through /admin at the end, or leave them (default: delete)
 //   --resume [ID]               continue a session (default: the latest). Same agents, same server, same personalities
 //   --keywords N                keywords dealt to each agent for its personality (default 2)
-//   --round-minutes N           give up on an agent's round after this long (default 15)
+//   --round-delay N             wait this many minutes between rounds (default 0)
+//   --round-minutes N          give up on an agent's round after this long (default 15)
 //   --context N                 the model's context window in tokens, for the harness's compaction (default 40000; Gemma 4 runs at 83840)
 //   --list                      list sessions
 // Env equivalents: LLAMA_URL, LLAMA_MODEL, APP_URL, ROUNDS, ROUND_MINUTES, KEEP=1, ADMIN_USER, ADMIN_PASSWORD.
@@ -71,7 +74,7 @@ const fail = (msg: string): never => {
   console.error(msg);
   process.exit(2);
 };
-const KNOWN = ["agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "list", "help"];
+const KNOWN = ["round-delay", "provider","budget", "input-price", "output-price", "agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "list", "help"];
 for (const name of flags.keys()) if (!KNOWN.includes(name)) fail(`Unknown option --${name}. Options are listed at the top of scripts/load.ts (or run with --help).`);
 if (flags.has("help")) {
   console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith("//")).map((l) => l.slice(3)).join("\n"));
@@ -106,6 +109,16 @@ if (flags.has("list")) {
 
 // ---- model server ----------------------------------------------------------------------------
 async function findModel(): Promise<ModelProfile> {
+  if (flags.get("provider") === "anthropic") {
+    if (!process.env.ANTHROPIC_API_KEY) return fail("--provider anthropic needs ANTHROPIC_API_KEY in the environment.");
+    const id = flags.get("model") ?? process.env.LLAMA_MODEL ?? "claude-haiku-5-5";
+    const budget = Number(flags.get("budget") ?? 2);
+    if (!(budget > 0)) fail("--budget must be a positive number of US dollars.");
+    // Haiku 5.5 list price (prompts up to 100K tokens), US$ per million tokens. Cache reads are counted as plain input: a slight overcount, so the cap errs safe.
+    const [inPer, outPer] = flags.has("input-price") ? [Number(flags.get("input-price")), Number(flags.get("output-price"))] : [0.1, 0.5];
+    console.log(`model: ${id} via ${process.env.ANTHROPIC_BASE_URL ?? "api.anthropic.com"}, budget $${budget} per agent (ADR-0041)`);
+    return { type: "anthropic", baseUrl: process.env.ANTHROPIC_BASE_URL, model: id, label: id, apiKeyEnv: "ANTHROPIC_API_KEY", maxTokens: 1024, budgetUsd: budget, inputPerMTok: inPer, outputPerMTok: outPer };
+  }
   const url = (flags.get("llama") ?? process.env.LLAMA_URL ?? "").replace(/\/+$/, "");
   if (!url) {
     const found = await detectModel();
@@ -162,6 +175,8 @@ function runHarness(s: Session, i: number, prompt: string, round: number, roundM
     env: {
       ...process.env,
       HARNESS_HOME: dir,
+      // so the agent's wait tool never blocks past the round (ADR-0042)
+      HARNESS_RUN_DEADLINE: String(Date.now() + roundMs),
       HARNESS_LOCAL_FILE: join(dir, "settings.local.json"),
       HARNESS_PERSONALITY_FILE: join(dir, "personality.md"),
       NO_COLOR: "1",
@@ -223,7 +238,8 @@ if (resuming) {
   console.log(`continuing session ${session.id}: ${session.agents} agents on ${session.appUrl}, ${session.roundsDone} round(s) done`);
   // Prefer the model server the session used. Only if it no longer answers (or --llama says otherwise) look again.
   const saved = session.model.baseUrl ?? "";
-  const stillUp = !flags.has("llama") && !process.env.LLAMA_URL && (await fetch(`${saved}/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false));
+  const hosted = session.model.type === "anthropic"; // a hosted model has no /models to probe; its key is checked when a call is made
+  const stillUp = hosted || !flags.has("llama") && !process.env.LLAMA_URL && (await fetch(`${saved}/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false));
   if (stillUp) console.log(`model server: ${session.model.model} @ ${saved} (as before)`);
   else {
     if (!flags.has("llama") && !process.env.LLAMA_URL) console.log(`the model server this session used (${saved}) does not answer; looking for another`);
@@ -254,12 +270,13 @@ if (resuming) {
 
 const contextTokens = intFlag("context", process.env.CONTEXT_TOKENS, 40000, 4000, 1_000_000);
 const rounds = intFlag("rounds", process.env.ROUNDS, 3, resuming ? 0 : 1, 100);
+const delayMs = intFlag("round-delay", process.env.ROUND_DELAY, 0, 0, 240) * 60_000;
 const model = session.model;
 const del = session.deleteAtEnd;
 saveSession(session);
 
 // One llama.cpp slot serves one request at a time; the rest wait their turn.
-try {
+if (model.type === "openai") try {
   const props: any = await (await fetch((model.baseUrl ?? "").replace(/\/v1$/, "") + "/props", { signal: AbortSignal.timeout(5000) })).json();
   if (props.total_slots < session.agents) console.warn(`note: the llama server has ${props.total_slots} slot(s) for ${session.agents} agents, so their model calls queue (each waits for the others). ADR-0005: more slots split the context, so raise -c with -np.`);
 } catch {
@@ -320,6 +337,10 @@ for (let r = 1; r <= rounds; r++) {
   if (joined === 0) {
     console.error(`\nNo agent could register on ${session.appUrl}. Look at ${instanceDir(session.id, 0)}${process.platform === "win32" ? "\\" : "/"}round-${round}.log for the error, then continue with --resume.`);
     break;
+  }
+  if (r < rounds && delayMs) {
+    console.log(`waiting ${delayMs / 60_000} min before round ${round + 1}...`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }
 

@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ModelProfile, Thinking } from "./settings.ts";
 
 export interface Msg { role: "user" | "assistant"; content: string }
@@ -5,7 +7,7 @@ export type Kind = "think" | "text";
 /** Gets every piece of the reply as it arrives. Return true to stop generating (the reply so far is kept). */
 export type Sink = (kind: Kind, s: string) => boolean | void;
 /** `text` is the model's answer (may contain inline <think> blocks); `reasoning` is what the server sent as separate reasoning. */
-export interface Reply { text: string; reasoning: string }
+export interface Reply { text: string; reasoning: string; usage?: { input: number; output: number } }
 
 const BUDGET: Record<Thinking, number> = { off: 0, low: 1024, medium: 4096, high: 12000 };
 
@@ -53,7 +55,34 @@ export class ThinkSplitter {
 export async function chat(p: ModelProfile, system: string, messages: Msg[], thinking: Thinking, sink: Sink = () => {}): Promise<Reply> {
   const key = p.apiKeyEnv ? process.env[p.apiKeyEnv] : undefined;
   if (p.apiKeyEnv && !key) throw new Error(`Set the ${p.apiKeyEnv} environment variable to use this model.`);
-  return p.type === "anthropic" ? anthropic(p, key!, system, messages, thinking, sink) : openai(p, key, system, messages, thinking, sink);
+  const budgeted = p.budgetUsd !== undefined && p.inputPerMTok !== undefined && p.outputPerMTok !== undefined && !!process.env.HARNESS_HOME;
+  if (budgeted) {
+    const spent = readSpend();
+    if (spent.usd >= p.budgetUsd!) throw new Error(`Budget used up: $${spent.usd.toFixed(4)} spent of $${p.budgetUsd!.toFixed(2)} for this agent (ADR-0041). Raise budgetUsd in its settings to go on.`);
+  }
+  const reply = await (p.type === "anthropic" ? anthropic(p, key!, system, messages, thinking, sink) : openai(p, key, system, messages, thinking, sink));
+  if (budgeted && reply.usage) addSpend(reply.usage, p.inputPerMTok!, p.outputPerMTok!);
+  return reply;
+}
+
+// Per-agent spend (ADR-0041): one file in the agent's HARNESS_HOME, so each load-test agent has its own budget.
+// Only tracked when HARNESS_HOME is set; the interactive harness and the launcher's own calls are not capped.
+interface Spend { usd: number; inputTokens: number; outputTokens: number }
+const spendFile = (): string => join(process.env.HARNESS_HOME ?? ".", "spend.json");
+function readSpend(): Spend {
+  try {
+    return JSON.parse(readFileSync(spendFile(), "utf8"));
+  } catch {
+    return { usd: 0, inputTokens: 0, outputTokens: 0 };
+  }
+}
+function addSpend(u: { input: number; output: number }, inPerM: number, outPerM: number): void {
+  const s = readSpend();
+  s.inputTokens += u.input;
+  s.outputTokens += u.output;
+  s.usd += (u.input * inPerM + u.output * outPerM) / 1_000_000;
+  mkdirSync(process.env.HARNESS_HOME!, { recursive: true });
+  writeFileSync(spendFile(), JSON.stringify(s, null, 2) + "\n");
 }
 
 /** POST and read the server-sent events; `onEvent` gets each JSON payload and may return true to stop early. */
@@ -152,6 +181,12 @@ async function anthropic(p: ModelProfile, key: string, system: string, messages:
   if (budget) body.thinking = { type: "enabled", budget_tokens: budget };
   const r: Reply = { text: "", reasoning: "" };
   await stream(`${p.baseUrl ?? "https://api.anthropic.com"}/v1/messages`, { "x-api-key": key, "anthropic-version": "2023-06-01" }, body, (e) => {
+    // usage: input tokens arrive in message_start, the running output total in message_delta
+    if (e.type === "message_start" && e.message?.usage) {
+      const u = e.message.usage;
+      r.usage = { input: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0), output: u.output_tokens ?? 0 };
+    }
+    if (e.type === "message_delta" && e.usage) r.usage = { input: r.usage?.input ?? 0, output: e.usage.output_tokens ?? r.usage?.output ?? 0 };
     if (e.type !== "content_block_delta") return;
     if (e.delta?.type === "thinking_delta") {
       r.reasoning += e.delta.thinking;

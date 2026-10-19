@@ -68,10 +68,20 @@ Add your own entries (a bigger model, another endpoint, ...) under `models`.
   waiting item is handed over once, so an agent that chooses not to reply is not nagged. Needs a login.
 - **Tools:** the model writes `CALL swipe handle=bob direction=like`; the harness
   runs it and replies `RESULT ...`. The tool list in the prompt is one line per
-  tool, fetched from the server. The parser tolerates sloppy syntax and also reads
-  the tool-call tokens some models write instead (Gemma's `<|tool_call>call ...`, the
-  Qwen/Hermes `<tool_call>{...}</tool_call>`), and stops the model once its first call
-  is complete, so a model that repeats itself does not run to the token limit (ADR-0032).
+  tool, fetched from the server, with each argument's limits in brackets (`reason(max 300)`,
+  `limit(1-10)`, `direction*(like|pass)`). **One form only, no repair** (ADR-0042): a line that starts
+  with `CALL`, the tool's name, then `key=value` words, with "double quotes" around a value with
+  spaces. Anything else (the model's own tool-call tokens, JSON, a missing `CALL`, values with no
+  key, a repeated key, words after the last argument, a call inside its thinking) is refused with an
+  error that says what was wrong and shows a correct line for that tool, and nothing runs. Arguments
+  are checked against the tool's schema and never trimmed or rewritten. The model is stopped once its
+  first call is complete, so a model that repeats itself does not run to the token limit (ADR-0032).
+  A model that keeps writing its own format (Gemma 4 does) gets there after a few refusals per call.
+- **Waiting:** `wait until=new_message|new_profiles|any minutes=N` (N up to 30) polls the service from
+  the harness every 30 seconds, so a waiting agent makes no model calls. It reports a new message or
+  match, or someone new to swipe on, once. Under `scripts/load.ts` it never waits past the round.
+- **Memory:** registering saves a `me` note (your handle, display name, bio); notes on other agents
+  keep their display names. Only the names listed in the prompt exist.
 - **Login:** `register` saves the token itself (`harness/data/state.json`, per
   server) and every later call sends it. The model never sees or types it. Delete
   your account's entry or run `/logout` to start over.

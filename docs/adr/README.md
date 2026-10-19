@@ -41,7 +41,7 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0029](0029-load-test-with-many-harness-instances.md) | Load-test with N harness instances sharing one llama.cpp server | accepted |
 | [0030](0030-fixed-admin-login-and-bulk-delete.md) | A fixed admin login with a login page, and bulk delete | accepted |
 | [0031](0031-agent-personalities-sessions-and-bat-launcher.md) | Invented personalities, resumable sessions and a .bat launcher for the load test | accepted |
-| [0032](0032-native-tool-call-formats.md) | The harness reads a model's native tool-call format and stops at the end of a call | accepted |
+| [0032](0032-native-tool-call-formats.md) | The harness reads a model's native tool-call format and stops at the end of a call | superseded by ADR-0042 (parsing only) |
 | [0033](0033-people-memory-and-task-continuity-in-compaction.md) | Compaction keeps an indexed note on each person and keeps the agent on task | accepted |
 | [0034](0034-stored-log-downloadable-by-week.md) | Keep the log in SQLite and let admin download it by week | accepted |
 | [0035](0035-group-chat-messages-in-live-feed.md) | Group back-and-forth messages into one live-feed row per chat | accepted |
@@ -50,3 +50,5 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0038](0038-server-side-permissions-model.md) | Who can see and change what, enforced on the server | accepted |
 | [0039](0039-notes-each-turn-and-loop-guard.md) | Write people notes when a turn ends, and stop a call at a repeated argument | accepted |
 | [0040](0040-selective-agents.md) | Agents are told to be selective, and to be able to say no | accepted |
+| [0041](0041-hosted-claude-agents-with-spend-cap.md) | Load-test agents can run on Claude, with a dollar cap per agent | accepted |
+| [0042](0042-strict-tool-calls-limits-and-wait.md) | Strict tool calls, visible limits, names in memory, and a wait tool | accepted |

@@ -2,184 +2,164 @@ import { readFileSync } from "node:fs";
 import { approxTokens, compactionSettings, cutPoint, summarize, updatePeople } from "./compact.ts";
 import { chat, type Kind, type Msg } from "./llm.ts";
 import { forget, indexForPrompt, peopleForPrompt, readMemory, readPerson, remember } from "./memory.ts";
+import { findPending, type MatchInfo } from "./auto.ts";
 import { McpClient, McpError, type ToolInfo } from "./mcp.ts";
 import { modelLabel } from "./detect.ts";
 import { activeProfile, clearAccount, getAccount, PERSONALITY_FILE, saveAccount, type Settings } from "./settings.ts";
 
+export const MAX_WAIT_MINUTES = 30;
+
 // ---- the tool-calling protocol ---------------------------------------------------------------
-// As simple as it gets: the model writes ONE line, `CALL name key=value key=value`, and the harness
-// answers with `RESULT ...`. No JSON, no schemas, no provider-specific tool API. A 3B model can do it,
-// and the same text works for llama.cpp, OpenAI and Anthropic alike.
+// As simple and as strict as it gets (ADR-0042): the model writes ONE line, `CALL name key=value key=value`,
+// and the harness answers with `RESULT ...`. No JSON, no schemas, no provider-specific tool API, and no
+// guessing: what runs is exactly what the model wrote, or the model gets an error that shows the right form.
 const PROTOCOL = `To do something, write one line and nothing else:
 CALL tool_name key=value key=value
+Every argument is key=value. Put double quotes around a value with spaces (write \\" for a quote inside it). Numbers have no quotes. Write nothing after the last argument. One call per reply.
 Example: CALL swipe handle=bob direction=like
-Put quotes around values with spaces. Then wait: I will answer with RESULT.
+Example: CALL send_message match_id=3 body="Hi Bob, how is your day?"
+The brackets in the tool list give limits: (max 300) is the longest text, (1-10) the allowed numbers, (like|pass) the only choices. Going over is refused.
+Then wait: I will answer with RESULT. If there is nothing to do for now, call wait instead of repeating calls.
 As soon as the task is done, stop calling tools and reply with a short summary (no CALL).`;
 
 const LOCAL_TOOLS: ToolInfo[] = [
-  { name: "remember", description: "Save a note to your memory.", inputSchema: { properties: { name: { type: "string" }, text: { type: "string" } }, required: ["name", "text"] } },
-  { name: "read_person", description: "Read your notes on another agent you have dealt with.", inputSchema: { properties: { handle: { type: "string" } }, required: ["handle"] } },
-  { name: "read_memory", description: "Read a saved note.", inputSchema: { properties: { name: { type: "string" } }, required: ["name"] } },
-  { name: "forget", description: "Delete a saved note.", inputSchema: { properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "remember", description: "Save a note to your memory.", inputSchema: { properties: { name: { type: "string", minLength: 1, maxLength: 40 }, text: { type: "string", minLength: 1, maxLength: 2000 } }, required: ["name", "text"] } },
+  { name: "read_person", description: "Read your notes on another agent you have dealt with.", inputSchema: { properties: { handle: { type: "string", minLength: 1, maxLength: 40 } }, required: ["handle"] } },
+  { name: "read_memory", description: "Read a saved note.", inputSchema: { properties: { name: { type: "string", minLength: 1, maxLength: 40 } }, required: ["name"] } },
+  { name: "forget", description: "Delete a saved note.", inputSchema: { properties: { name: { type: "string", minLength: 1, maxLength: 40 } }, required: ["name"] } },
+  {
+    name: "wait",
+    description: "Wait for news without spending tokens: until=new_message (a reply or a new match), new_profiles (someone new to swipe on) or any; minutes is the longest to wait.",
+    inputSchema: { properties: { until: { type: "string", enum: ["new_message", "new_profiles", "any"] }, minutes: { type: "integer", minimum: 1, maximum: MAX_WAIT_MINUTES } } },
+  },
 ];
 
 const firstSentence = (s: string): string => (s.match(/^.*?[.!?](\s|$)/)?.[0] ?? s).trim().slice(0, 110);
 
-/** `swipe handle direction(like|pass)`: one short line per tool, `*` marks a required argument. */
+/** A correct call for a tool, built from its schema: required arguments only, with a plausible value for each. */
+export function exampleCall(t: ToolInfo): string {
+  const props = t.inputSchema.properties ?? {};
+  const words = (t.inputSchema.required ?? Object.keys(props).slice(0, 0)).map((k) => {
+    const options: any[] = props[k]?.anyOf ?? [props[k] ?? {}];
+    const str = options.find((s) => s.type === "string");
+    if (str?.enum?.length) return `${k}=${str.enum[0]}`;
+    if (options.some((s) => s.type === "integer" || s.type === "number")) return `${k}=3`;
+    return `${k}="..."`;
+  });
+  return `CALL ${t.name}${words.length ? " " + words.join(" ") : ""}`;
+}
+
+/** The part of an argument's schema the model needs to see: its choices, its largest length, or its range. */
+function limitOf(v: any): string {
+  const options: any[] = v.anyOf ?? [v];
+  const str = options.find((s) => s.type === "string");
+  const num = options.find((s) => s.type === "integer" || s.type === "number");
+  if (str && Array.isArray(str.enum)) return `(${str.enum.join("|")})`;
+  if (str) {
+    const set = /^\^\[([^\]]+)\]\{(\d+),(\d+)\}\$$/.exec(str.pattern ?? "");
+    if (set) return `(${set[1]}, ${set[2]}-${set[3]} chars)`;
+    if (str.maxLength) return `(max ${str.maxLength})`;
+  }
+  if (num) {
+    const sane = (n: unknown): n is number => typeof n === "number" && Math.abs(n) < 1e9;
+    if (sane(num.minimum) && sane(num.maximum)) return `(${num.minimum}-${num.maximum})`;
+  }
+  return "";
+}
+
+/** `swipe handle direction(like|pass)`: one short line per tool, `*` marks a required argument, brackets the limits. */
 export function toolLine(t: ToolInfo): string {
   const req = new Set(t.inputSchema.required ?? []);
-  const args = Object.entries(t.inputSchema.properties ?? {}).map(([k, v]) => {
-    const opts = Array.isArray(v.enum) ? `(${v.enum.join("|")})` : "";
-    return `${k}${req.has(k) ? "*" : ""}${opts}`;
-  });
+  const args = Object.entries(t.inputSchema.properties ?? {}).map(([k, v]) => `${k}${req.has(k) ? "*" : ""}${limitOf(v)}`);
   return `${t.name} ${args.join(" ")}`.trim() + ` - ${firstSentence(t.description)}`;
 }
 
 // ---- parsing a CALL line ---------------------------------------------------------------------
+// One form only. A call is a line that starts with `CALL`, then the tool's name, then `key=value` words. A value is
+// a bare word or "double-quoted" (backslash-quote for a quote inside). Native tool tokens, JSON, values without a
+// key, repeated keys, and words after the arguments are all errors. The model is never second-guessed: a call that
+// is not exactly right does not run, which also means nothing can be smuggled into a call by what follows it.
 export interface Call {
   name: string;
   args: Record<string, string>;
-  /** bare values with no key, e.g. `CALL swipe bob like`; matched to the tool's arguments in order */
-  positional: string[];
-  json?: Record<string, unknown>;
   /** the raw line the call was found on */
   line: string;
 }
-
-/**
- * Split on spaces, keeping "quoted strings" and 'quoted strings' together (key="a b" -> key=a b). `quoted` says a
- * quote was used in that word: a quoted value is complete, so anything after it is not part of it.
- */
-function words(s: string): { w: string; quoted: boolean }[] {
-  const out: { w: string; quoted: boolean }[] = [];
-  let cur = "";
-  let quote = "";
-  let started = false;
-  let quoted = false;
-  const push = (): void => {
-    out.push({ w: cur, quoted });
-    cur = "";
-    started = false;
-    quoted = false;
-  };
-  for (const ch of s) {
-    if (quote) {
-      if (ch === quote) quote = "";
-      else cur += ch;
-    } else if (ch === '"' || ch === "'" || ch === "“" || ch === "”") {
-      quote = ch === "“" ? "”" : ch;
-      started = true;
-      quoted = true;
-    } else if (/\s/.test(ch)) {
-      if (started || cur) push();
-    } else {
-      cur += ch;
-      started = true;
-    }
-  }
-  if (started || cur) push();
-  return out;
+export interface CallError {
+  error: string;
+  /** the tool the model was calling, when it got that far (so the error can show its usage) */
+  name?: string;
 }
+export const isCallError = (c: Call | CallError | null | undefined): c is CallError => !!c && "error" in c;
 
-// (`RESULT` too: a model that has only seen RESULT lines sometimes starts its own call with it)
-const CALL_PREFIX = /^[`>*\- ]*((CALL|RESULT):?\s+)?/i;
+const cut = (s: string, n = 40): string => (s.length > n ? s.slice(0, n) + "…" : s);
 
-// Models trained on their own tool-calling format write it even when told to use CALL: Gemma writes
-// `<|tool_call>call swipe handle="x" direction="like"<tool_call|>` or `<|tool_call>call:swipe{handle:<|"|>x<|"|>}`,
-// Qwen and Hermes write `<tool_call>{"name":"swipe","arguments":{...}}</tool_call>`. All of them are read as calls.
-const NATIVE_OPEN = /<\|?tool_call\|?>/;
-const NATIVE_END = /<\|?tool_call\|?>|<\/tool_call>|<tool_call\|>|<\|\/tool_call\|>/;
-// `call swipe`, `call:swipe`, `call tool_name:swipe`: the words some formats put before the tool's name
-const NATIVE_LEAD = /^(?:(?:call|tool_name|name|function)(?:\s*[:=]\s*|\s+))+/i;
-
-/** Where the first native tool call in `text` is: from its opener to the next opener or closer, or to the end if still open. */
-function nativeSegment(text: string): { start: number; end: number; closed: boolean } | null {
-  const open = NATIVE_OPEN.exec(text);
-  if (!open) return null;
-  const from = open.index + open[0].length;
-  const stop = NATIVE_END.exec(text.slice(from));
-  return { start: open.index, end: stop ? from + stop.index : text.length, closed: Boolean(stop) };
-}
-
-/** A JSON object, also in Gemma's relaxed form: `{handle:<|"|>bob<|"|>,limit:5}`. */
-function looseObject(text: string): Record<string, unknown> | undefined {
-  const body = text.slice(0, text.lastIndexOf("}") + 1);
-  for (const candidate of [body, body.replace(/<\|"\|>/g, '"').replace(/([{,]\s*)([a-z_][a-z0-9_]*)\s*:/gi, '$1"$2":')]) {
-    try {
-      const v = JSON.parse(candidate);
-      if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
-    } catch {}
-  }
-  return undefined;
-}
-
-/** `limit=5 handle="a b" bio=Hello there`: what follows a tool's name. Words after a quoted value are not part of it. */
-function parseTail(name: string, tail: string, line: string): Call | "malformed" {
-  if (tail.startsWith("{")) {
-    const json = looseObject(tail);
-    return json ? { name, args: {}, positional: [], json, line } : "malformed";
-  }
+/** The arguments after a tool's name, or a message saying what is wrong with them. */
+function parseArgs(tail: string): Record<string, string> | string {
   const args: Record<string, string> = {};
-  const positional: string[] = [];
-  let last: string | undefined;
-  let lastQuoted = false;
-  for (const { w, quoted } of words(tail)) {
-    const eq = w.indexOf("=");
-    if (eq > 0 && /^[a-z_][a-z0-9_]*$/i.test(w.slice(0, eq))) {
-      if (last) args[last] = args[last].replace(/,+$/, ""); // models like `a=1, b=2`
-      if (w.slice(0, eq) in args) break; // a key twice is a model starting over or looping: the call ended before it
-      last = w.slice(0, eq);
-      args[last] = w.slice(eq + 1);
-      lastQuoted = quoted;
-    } else if (last && !lastQuoted) args[last] += ` ${w}`; // an unquoted value that contains spaces
-    else positional.push(w);
+  const n = tail.length;
+  let i = 0;
+  const skip = (): void => {
+    while (i < n && /\s/.test(tail[i])) i++;
+  };
+  skip();
+  while (i < n) {
+    const m = /^([a-z_][a-z0-9_]*)=/.exec(tail.slice(i));
+    if (!m) return `unexpected "${cut(tail.slice(i).split(/\s/)[0])}": every argument is written key=value, and nothing may follow the last one`;
+    const key = m[1];
+    i += m[0].length;
+    if (key in args) return `${key} is given twice`;
+    if (tail[i] === '"') {
+      i++;
+      let v = "";
+      let closed = false;
+      while (i < n) {
+        const ch = tail[i++];
+        if (ch === "\\" && (tail[i] === '"' || tail[i] === "\\")) v += tail[i++];
+        else if (ch === '"') {
+          closed = true;
+          break;
+        } else v += ch;
+      }
+      if (!closed) return `the quote opened for ${key} is never closed (keep the whole call on one line)`;
+      if (i < n && !/\s/.test(tail[i])) return `after the closing quote of ${key} comes "${cut(tail.slice(i).split(/\s/)[0])}": put a space, then the next key=value`;
+      args[key] = v;
+    } else {
+      let j = i;
+      while (j < n && !/\s/.test(tail[j])) j++;
+      const v = tail.slice(i, j);
+      if (!v) return `${key} has no value`;
+      if (v.includes('"')) return `${key}: put double quotes around the whole value, e.g. ${key}="two words"`;
+      args[key] = v;
+      i = j;
+    }
+    skip();
   }
-  if (last) args[last] = args[last].replace(/,+$/, "");
-  return { name, args, positional, line };
-}
-
-/** One line of a reply as a call: `CALL name ...`, or a bare `name ...` for a known tool. */
-function parseLine(raw: string, toolNames: string[]): Call | "malformed" | null {
-  const line = raw.trim().replace(CALL_PREFIX, (m) => (/call|result/i.test(m) ? "CALL " : "")).replace(/`+$/, "");
-  const hasCall = /^CALL\s/.test(line);
-  const rest = line.replace(/^CALL\s+/, "");
-  const name = rest.match(/^[a-z_][a-z0-9_]*/i)?.[0];
-  if (hasCall && !name) return "malformed";
-  if (!name || !(hasCall || toolNames.includes(name))) return null;
-  return parseTail(name, rest.slice(name.length).trim(), raw);
-}
-
-/** The call inside a native segment, or "malformed". Only the first line of it counts unless it is a JSON object. */
-function parseNative(seg: string): Call | "malformed" {
-  let body = seg.replace(NATIVE_OPEN, "").trim();
-  if (body.startsWith("{")) {
-    const obj = looseObject(body);
-    const name = obj?.name;
-    if (typeof name !== "string") return "malformed";
-    const argsObj = obj!.arguments ?? obj!.parameters;
-    return { name, args: {}, positional: [], json: argsObj && typeof argsObj === "object" ? (argsObj as Record<string, unknown>) : {}, line: seg };
-  }
-  body = (body.split("\n")[0] ?? "").trim().replace(NATIVE_LEAD, "");
-  const name = body.match(/^[a-z_][a-z0-9_]*/i)?.[0];
-  return name ? parseTail(name, body.slice(name.length).trim(), seg) : "malformed";
+  return args;
 }
 
 /**
- * Finds the first tool call in a reply. Small models are sloppy, so this forgives: a missing `CALL`,
- * backticks, a JSON object for the arguments, unquoted values with spaces, bare values with no `key=`,
- * and the model's own native tool-call tokens (see above).
+ * Finds the call in a reply: the first line that starts with `CALL`. Prose without one is the model's answer (null).
+ * A try at some other format (native tokens, JSON, a bare tool name) is an error, not a call.
  */
-export function parseCall(reply: string, toolNames: string[]): Call | "malformed" | null {
-  let offset = 0;
-  for (const raw of reply.split("\n")) {
-    const at = raw.search(NATIVE_OPEN);
-    if (at >= 0) {
-      const seg = nativeSegment(reply.slice(offset + at))!;
-      return parseNative(reply.slice(offset + at, offset + at + seg.end));
-    }
-    const found = parseLine(raw, toolNames);
-    if (found) return found;
-    offset += raw.length + 1;
+export function parseCall(reply: string, toolNames: string[]): Call | CallError | null {
+  const lines = reply.split("\n");
+  for (const raw of lines) {
+    const line = raw.trimStart();
+    if (!/^CALL(\s|$)/.test(line)) continue;
+    const m = /^CALL\s+([a-z_][a-z0-9_]*)(?:\s+(.*))?$/s.exec(line.trimEnd());
+    if (!m) return { error: "after CALL comes the tool's name, e.g. CALL whoami" };
+    const args = parseArgs(m[2] ?? "");
+    return typeof args === "string" ? { error: args, name: m[1] } : { name: m[1], args, line: raw };
+  }
+  if (/<\|?tool_call\|?>|<\/tool_call>|^\s*\{\s*"name"\s*:/m.test(reply)) {
+    // Only to make the error useful: name the tool it was after, never to run it.
+    const guess = reply.match(/<\|?tool_call\|?>\s*(?:call\s*[:=]?\s*)?([a-z_][a-z0-9_]*)/i)?.[1] ?? reply.match(/"name"\s*:\s*"([a-z_][a-z0-9_]*)"/)?.[1];
+    return { error: "that is not the format used here (no <|tool_call> tokens, no JSON): the line must START with the word CALL", name: guess && toolNames.includes(guess) ? guess : undefined };
+  }
+  for (const raw of lines) {
+    const word = raw.trim().match(/^[a-z_][a-z0-9_]*/)?.[0];
+    if (word && toolNames.includes(word) && /^\s*(?:[a-z_][a-z0-9_]*=|$)/.test(raw.trim().slice(word.length))) return { error: `start the line with CALL: CALL ${word} ...`, name: word };
   }
   return null;
 }
@@ -192,126 +172,66 @@ const looping = (text: string): boolean => {
 };
 const MAX_CALL_CHARS = 3000;
 
-/** Where an unquoted word longer than `max` characters starts, or -1: junk such as `end_thought/out/thought//out/...` growing without end. */
-export function longWordAt(text: string, max = 60): number {
-  let quote = "";
-  let start = -1;
-  for (let i = 0; i <= text.length; i++) {
-    const ch = text[i] ?? " ";
-    if (quote) {
-      if (ch === quote) quote = "";
-      continue;
-    }
-    if (ch === '"' || ch === "'") quote = ch;
-    if (/\s/.test(ch)) start = -1;
-    else if (start < 0) start = i;
-    else if (i - start > max) return start;
-  }
-  return -1;
-}
-
-/** Where an argument name (`key=`) appears for the second time in a call, outside quotes, or -1. A model that does this is repeating itself. */
-export function repeatedKeyAt(text: string): number {
-  const seen = new Set<string>();
-  let quote = "";
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quote) {
-      if (ch === quote) quote = "";
-    } else if (ch === '"' || ch === "'") quote = ch;
-    else if (/[a-z_]/i.test(ch) && (i === 0 || /[\s,]/.test(text[i - 1]))) {
-      const key = /^[a-z_][a-z0-9_]*(?==)/i.exec(text.slice(i))?.[0];
-      if (key) {
-        if (seen.has(key)) return i;
-        seen.add(key);
-        i += key.length;
-      }
-    }
-  }
-  return -1;
-}
-
 /**
- * Where the first tool call in streamed `text` is finished, or -1 while it is still being written. The agent stops
- * the model there: everything after a call is invented, and a model that repeats itself would otherwise run
- * to the token limit (several minutes on a local model) and put the repetition into its own history.
+ * Where the first call in streamed `text` is finished, or -1 while it is still being written. The agent stops the
+ * model there: everything after a call is invented, and a model that repeats itself would otherwise run to the
+ * token limit (several minutes on a local model) and put the repetition into its own history.
  */
-export function callEnd(text: string, toolNames: string[]): number {
-  const seg = nativeSegment(text);
-  if (seg) {
-    if (seg.closed) return seg.end;
-    const body = text.slice(seg.start).replace(NATIVE_OPEN, "").replace(/^\s+/, "");
-    const nl = body.indexOf("\n");
-    if (!body.startsWith("{") && nl > 0) return text.length - body.length + nl;
-    const again = body.startsWith("{") ? -1 : repeatedKeyAt(body);
-    if (again > 0) return text.length - body.length + again;
-    const junk = body.startsWith("{") ? -1 : longWordAt(body);
-    if (junk > 0) return text.length - body.length + junk;
-    return looping(body) || body.length > MAX_CALL_CHARS ? text.length : -1;
-  }
+export function callEnd(text: string): number {
   let offset = 0;
   for (const raw of text.split("\n")) {
     const end = offset + raw.length;
-    const complete = end < text.length; // a newline follows: the model has moved on
-    const found = parseLine(raw, toolNames);
-    if (found && found !== "malformed") {
-      const again = repeatedKeyAt(raw);
-      if (again > 0) return offset + again;
-      const junk = longWordAt(raw);
-      if (junk > 0) return offset + junk;
-      return complete || looping(raw) || raw.length > MAX_CALL_CHARS ? end : -1;
-    }
+    if (/^\s*CALL(\s|$)/.test(raw)) return end < text.length || looping(raw) || raw.length > MAX_CALL_CHARS ? end : -1;
     offset = end + 1;
   }
   return -1;
 }
 
-/** Turn the strings the model wrote into the types the tool's schema wants. */
-export function coerce(tool: ToolInfo, call: Call): Record<string, unknown> {
+/** Checks the strings the model wrote against the tool's schema, strictly: nothing is repaired, only converted to the schema's types. */
+export function checkArgs(tool: ToolInfo, call: Call): { args: Record<string, unknown> } | { error: string } {
   const props = tool.inputSchema.properties ?? {};
-  const byLower = new Map(Object.keys(props).map((k) => [k.toLowerCase(), k]));
-  const out: Record<string, unknown> = { ...call.json };
-  if (Object.keys(props).length) for (const k of Object.keys(out)) if (!(k in props)) delete out[k];
-  const given: Record<string, string> = {};
-  for (const [k, v] of Object.entries(call.args)) given[byLower.get(k.toLowerCase()) ?? k] = v;
-  const free = Object.keys(props).filter((k) => !(k in given) && !(k in out));
-  call.positional.forEach((v, i) => {
-    if (free[i]) given[free[i]] = v;
-  });
-  const known = Object.keys(props).length > 0;
-  for (const [k, raw] of Object.entries(given)) {
-    // A model's stray words (`end=true`, `end_thought`) are not arguments of this tool: leave them out.
-    if (known && !(k in props)) continue;
-    const schemas: any[] = props[k]?.anyOf ?? [props[k] ?? {}];
-    const types: string[] = schemas.map((s) => s.type);
-    let v = raw.trim();
-    // A value can carry junk after it (`limit=5 end`, `direction=like end`): take the part the schema wants.
-    const options: string[] | undefined = schemas.find((s) => Array.isArray(s.enum))?.enum;
-    if (options && !options.includes(v)) {
-      const hit = v.split(/[^a-z0-9_]+/i).find((w) => options.some((o) => o.toLowerCase() === w.toLowerCase()));
-      if (hit) v = options.find((o) => o.toLowerCase() === hit.toLowerCase())!;
-    }
-    const pattern = schemas.find((s) => s.pattern)?.pattern;
-    if (pattern && !new RegExp(pattern).test(v)) {
-      const fixed = v.toLowerCase().replace(/[\s-]+/g, "_"); // "AI Bee" -> "ai_bee" for handles
-      if (new RegExp(pattern).test(fixed)) v = fixed;
-    }
-    if (types.includes("string") && !types.includes("array")) out[k] = v;
-    else if (types.includes("number") || types.includes("integer")) {
-      const num = v.replace(/^#/, "").match(/^-?\d+(\.\d+)?/);
-      // A stray word (a second tool's name, say) that landed in a numeric argument is left out, not sent as NaN/null.
-      const n = Number(num ? num[0] : v.replace(/^#/, ""));
-      if (Number.isFinite(n)) out[k] = n;
-    } else if (types.includes("boolean")) out[k] = /^(true|yes|1)$/i.test(v.split(/\s+/)[0]);
-    else if (types.includes("array")) {
-      try {
-        out[k] = JSON.parse(v);
-      } catch {
-        out[k] = v; // the server accepts "a, b" for interests (ADR-0011)
-      }
-    } else out[k] = v;
+  const known = Object.keys(props);
+  for (const k of Object.keys(call.args)) if (!(k in props)) return { error: `${tool.name} has no argument "${k}"${known.length ? `; its arguments are ${known.join(", ")}` : " and takes no arguments"}` };
+  const missing = (tool.inputSchema.required ?? []).filter((k) => !(k in call.args));
+  if (missing.length) return { error: `${tool.name} needs ${missing.join(", ")}` };
+  const args: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(call.args)) {
+    const r = typed(k, v, props[k]);
+    if ("error" in r) return r;
+    args[k] = r.value;
   }
-  return out;
+  return { args };
+}
+
+function typed(k: string, v: string, schema: any): { value: unknown } | { error: string } {
+  const options: any[] = schema.anyOf ?? [schema];
+  const str = options.find((s) => s.type === "string");
+  const num = options.find((s) => s.type === "integer" || s.type === "number");
+  const arr = options.find((s) => s.type === "array");
+  const bool = options.find((s) => s.type === "boolean");
+  if (arr && v.trim().startsWith("[")) {
+    try {
+      const list = JSON.parse(v);
+      if (Array.isArray(list)) return { value: list };
+    } catch {}
+    return { error: `${k} is not a valid list: write it as a quoted comma-separated string, e.g. ${k}="chess, tea"` };
+  }
+  if (str) {
+    if (Array.isArray(str.enum) && !str.enum.includes(v)) return { error: `${k} must be one of ${str.enum.join(", ")}` };
+    if (str.minLength && v.length < str.minLength) return { error: `${k} is empty` };
+    if (str.maxLength && v.length > str.maxLength) return { error: `${k} is ${v.length} characters; the most allowed is ${str.maxLength}` };
+    if (str.pattern && !new RegExp(str.pattern).test(v)) return { error: `${k} "${cut(v)}" is not allowed here (it must match ${str.pattern})` };
+    return { value: v };
+  }
+  if (num) {
+    if (!(num.type === "integer" ? /^-?\d+$/ : /^-?\d+(\.\d+)?$/).test(v)) return { error: `${k} must be a number${num.type === "integer" ? " with no decimals" : ""}, written without quotes (got "${cut(v)}")` };
+    const n = Number(v);
+    if (typeof num.minimum === "number" && Math.abs(num.minimum) < 1e9 && n < num.minimum) return { error: `${k} must be at least ${num.minimum}` };
+    if (typeof num.maximum === "number" && Math.abs(num.maximum) < 1e9 && n > num.maximum) return { error: `${k} must be at most ${num.maximum}` };
+    return { value: n };
+  }
+  if (bool) return v === "true" || v === "false" ? { value: v === "true" } : { error: `${k} must be true or false` };
+  return { value: v };
 }
 
 // ---- the agent -------------------------------------------------------------------------------
@@ -330,6 +250,8 @@ export interface Agent {
   /** Summarize everything before the recent tail now. False when there was nothing to summarize or the model failed. */
   compact(out: (s: string) => void, instructions?: string, keepRecent?: number): Promise<boolean>;
   account(): { handle: string; token: string } | undefined;
+  /** Parse one `CALL ...` line exactly as a reply would be and run it, returning the RESULT text. For tests and tools built on the agent. */
+  runCall(line: string): Promise<string>;
 }
 
 /** Receives the model's output as it streams: `token` per piece, `end` when a reply is finished. */
@@ -352,6 +274,11 @@ export function makeAgent(settings: Settings): Agent {
     logout,
     compact,
     account: () => getAccount(settings.serverUrl),
+    runCall: async (line) => {
+      const call = parseCall(line, [...agent.tools, ...LOCAL_TOOLS].map((t) => t.name));
+      if (!call || isCallError(call)) return `ERROR: ${call ? call.error : "no CALL"}`;
+      return runTool(call);
+    },
   };
 
   function loadToken(): void {
@@ -397,7 +324,7 @@ export function makeAgent(settings: Settings): Agent {
       `## You\n${acct?.handle ? `You are logged in as @${acct.handle}. Your login is saved automatically: never ask for it or type it.` : "You have no account yet. Use register (invent your own handle, display_name and bio) before anything else."}`,
       ...(agent.summary ? [`## Earlier in this conversation\nYour older messages were cut to save space. This is a summary of them:\n${agent.summary}\n\nYou were in the middle of your work. Carry on with "Doing Right Now", then "Next Steps", and keep going with your standing task: do not stop or wait to be asked.`] : []),
       `## People you have dealt with\nYour notes on other agents, updated each time your memory is cut (use read_person handle=... for the full note):\n${peopleForPrompt()}`,
-      `## Memory\nThings you saved earlier (use read_memory name=... for details):\n${indexForPrompt()}`,
+      `## Memory\nThings you saved earlier. Only these names exist (use read_memory name=... for details):\n${indexForPrompt()}`,
     ].join("\n\n");
   }
 
@@ -443,13 +370,88 @@ export function makeAgent(settings: Settings): Agent {
     while (size() > budget && agent.history.length > 2) agent.history.splice(0, 2); // keeps user/assistant alternation
   }
 
+  /**
+   * Wait for news without a model call: poll the service (plain tool calls, no tokens) until a match has a new
+   * message or a new match appears, or there is someone new to swipe on, or the time is up (ADR-0042).
+   */
+  // Messages and matches a `wait` has already told the agent about (or that were waiting when it first looked), kept
+  // across calls: an unanswered message must not be announced as news again and again. It is the agent's own
+  // business to answer it or not (ADR-0040).
+  const announced = new Set<string>();
+  let announcedFrom: string | undefined;
+
+  async function waitFor(until: string, minutes: number): Promise<string> {
+    // Never faster than once a second: the service allows 120 calls a minute per agent, and a wait makes two per poll.
+    const pollMs = Math.max(1000, Number(process.env.HARNESS_WAIT_POLL_MS ?? 30_000));
+    const now = Date.now();
+    // A run with a time limit (the load test's rounds) cannot be waited past: stop a minute early so it ends cleanly.
+    const runEnd = Number(process.env.HARNESS_RUN_DEADLINE ?? 0);
+    const minuteMs = Number(process.env.HARNESS_WAIT_MINUTE_MS ?? 60_000); // shortened only by the tests
+    const wanted = now + Math.min(Math.max(minutes, 1), MAX_WAIT_MINUTES) * minuteMs;
+    const deadline = runEnd > 0 ? Math.min(wanted, runEnd - 60_000) : wanted;
+    if (runEnd > 0 && deadline - now < pollMs) return "Time is up for this run: there is no time left to wait. Reply now with a one-line summary of what you did.";
+    // One poll: the JSON in a tool's answer, or the error text. A failed poll (a rate limit, a dropped connection)
+    // is tried again at the next interval; it must not end the agent's turn.
+    let lastError = "";
+    const poll = async (tool: string, args: Record<string, unknown>): Promise<any | undefined> => {
+      try {
+        const r = await mcp.call(tool, args);
+        if (r.isError) {
+          lastError = r.text.slice(0, 160);
+          return undefined;
+        }
+        return JSON.parse(r.text.slice(0, r.text.lastIndexOf("}") + 1));
+      } catch (err) {
+        lastError = (err as Error).message.slice(0, 160);
+        return undefined;
+      }
+    };
+    const wantMessages = until !== "new_profiles";
+    const wantProfiles = until !== "new_message";
+    // Another account (a new login) starts with a clean slate.
+    const me = getAccount(settings.serverUrl)?.handle;
+    if (announcedFrom !== me) {
+      announced.clear();
+      announcedFrom = me;
+    }
+    let first = true;
+    for (;;) {
+      let seenAny = false;
+      if (wantMessages) {
+        const m = await poll("list_matches", {});
+        if (m) {
+          seenAny = true;
+          const found = findPending(m.matches as MatchInfo[], announced);
+          // What was already waiting the first time we looked is not news: only a change ends a wait.
+          found.forEach((p) => announced.add(p.key));
+          if (!first && found.length) {
+            return found.map((p) => (p.kind === "new_match" ? `New match with @${p.match.with} (match_id ${p.match.match_id}).` : `@${p.match.with} wrote in match ${p.match.match_id}.`)).join("\n");
+          }
+        }
+      }
+      if (wantProfiles) {
+        const p = await poll("get_next_profiles", { limit: 1 });
+        if (p) {
+          seenAny = true;
+          if ((p.profiles ?? []).length > 0) return "There are profiles to swipe on: call get_next_profiles.";
+        }
+      }
+      if (seenAny) first = false;
+      if (Date.now() + pollMs > deadline) return lastError && !seenAny ? `ERROR: could not check the service while waiting (${lastError}).` : `Nothing new after ${Math.max(1, Math.round((deadline - now) / 60_000))} minute(s).`;
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  }
+
   async function runTool(call: Call): Promise<string> {
     const local = LOCAL_TOOLS.find((t) => t.name === call.name);
     const tool = local ?? agent.tools.find((t) => t.name === call.name);
     if (!tool) return `ERROR: there is no tool called "${call.name}". Tools: ${[...agent.tools, ...LOCAL_TOOLS].map((t) => t.name).join(", ")}.`;
-    const args = coerce(tool, call);
+    const checked = checkArgs(tool, call);
+    if ("error" in checked) return `ERROR: ${checked.error}\nUsage: CALL ${toolLine(tool)}`;
+    const args = checked.args;
     if (local) {
       const s = (k: string): string => String(args[k] ?? "");
+      if (call.name === "wait") return waitFor(String(args.until ?? "any"), Number(args.minutes ?? 5));
       if (call.name === "read_person") return readPerson(s("handle")) || `You have no notes on "${s("handle")}".`;
       return call.name === "remember" ? remember(s("name"), s("text")) : call.name === "read_memory" ? readMemory(s("name")) : forget(s("name"));
     }
@@ -476,6 +478,8 @@ export function makeAgent(settings: Settings): Agent {
         const handle = text.match(/"handle":\s*"([^"]+)"/)?.[1] ?? getAccount(settings.serverUrl)?.handle ?? "";
         saveAccount(settings.serverUrl, handle, token);
         mcp.token = token;
+        // The agent's own name and handle go in its memory straight away (ADR-0042), so it never has to guess them.
+        if (call.name === "register" && handle) remember("me", `I am @${handle}, display name "${String(args.display_name ?? "")}". Bio: ${String(args.bio ?? "")}`);
         text = text.replace(token, "(saved automatically)");
         text += "\nYou are now logged in. Your login was saved: you do not need to do anything with it.";
         refreshTools().catch(() => {});
@@ -534,7 +538,7 @@ export function makeAgent(settings: Settings): Agent {
         }
         shown += s;
         const result = shown.search(/\n\s*RESULT\b/);
-        const done = callEnd(shown, toolNames);
+        const done = callEnd(shown);
         const cut = Math.min(result < 0 ? Infinity : result, done < 0 ? Infinity : done);
         if (cut === Infinity) {
           live?.token("text", s);
@@ -550,11 +554,11 @@ export function makeAgent(settings: Settings): Agent {
       let reply = got.text.replace(/\n\s*RESULT\b[\s\S]*$/, "").trim();
       if (process.env.HARNESS_DEBUG) console.error(`--- model said:\n${reply}\n---`);
       const visible = reply.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
-      // Small models sometimes write the call inside <think>; if the visible text has none, look there too.
-      const call = parseCall(visible, toolNames) ?? parseCall((reply + "\n" + reasoning).replace(/<\/?think>/g, ""), toolNames);
+      // Only the visible answer is read: a call written inside the model's thinking does not run.
+      const call = parseCall(visible, toolNames);
       // Keep only up to the first call in history: models imitate what they said before, and a reply that
       // planned five calls and invented their results teaches them to do it again.
-      const found = call && call !== "malformed" ? call : undefined;
+      const found = call && !isCallError(call) ? call : undefined;
       const at = found ? reply.indexOf(found.line) : -1;
       const kept = found && at >= 0 ? reply.slice(0, at + found.line.length) : reply;
       agent.history.push({ role: "assistant", content: kept || "(no reply)" });
@@ -565,11 +569,14 @@ export function makeAgent(settings: Settings): Agent {
         return;
       }
       let result: string;
-      if (call === "malformed") {
-        result = 'ERROR: I could not read that. Write exactly: CALL tool_name key=value key=value  (example: CALL swipe handle=bob direction=like)';
-        out("! malformed CALL");
+      if (isCallError(call)) {
+        const tool = [...agent.tools, ...LOCAL_TOOLS].find((t) => t.name === call.name);
+        // Show what to write, not only what was wrong: a model told "wrong" with no example repeats itself.
+        const example = tool ? exampleCall(tool) : "CALL swipe handle=bob direction=like";
+        result = `ERROR: not run: ${call.error}.\nYour last reply was NOT understood and nothing happened. Write exactly this kind of line, starting with the word CALL:\n${example}${tool ? `\nUsage: CALL ${toolLine(tool)}` : ""}`;
+        out(`! ${call.error}`);
       } else {
-        if (!live) out(`> ${call.name} ${call.positional.join(" ")} ${Object.entries(call.args).map(([k, v]) => `${k}=${v.length > 40 ? v.slice(0, 40) + "…" : v}`).join(" ")}`);
+        if (!live) out(`> ${call.name} ${Object.entries(call.args).map(([k, v]) => `${k}=${v.length > 40 ? v.slice(0, 40) + "…" : v}`).join(" ")}`);
         try {
           result = await runTool(call);
         } catch (err) {
@@ -577,7 +584,7 @@ export function makeAgent(settings: Settings): Agent {
           result = `ERROR: ${err.message}`;
         }
         out(`  ${result.split("\n").pop()!.slice(0, 200)}`);
-        if (visible.split("\n").filter((l) => /^[`>*\- ]*CALL\b/i.test(l.trim())).length > 1) result += "\n(Only your first CALL ran. Do one CALL at a time and wait for RESULT.)";
+        if (visible.split("\n").filter((l) => /^\s*CALL\b/.test(l)).length > 1) result += "\n(Only your first CALL ran. Do one CALL at a time and wait for RESULT.)";
       }
       agent.history.push({ role: "user", content: `RESULT ${result}` });
       turn.push(agent.history[agent.history.length - 1]);
