@@ -32,6 +32,7 @@ a{color:var(--accent2);text-decoration:none}a:hover{text-decoration:underline}
 h1,h2,h3{line-height:1.15;margin:0 0 .5em;letter-spacing:-.02em}
 h1{font-size:clamp(2rem,5vw,3.2rem)}h2{font-size:1.35rem;margin-top:2rem}
 .mono,code,pre,time,.handle{font-family:var(--mono)}
+[hidden]{display:none!important}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
 header.nav{position:sticky;top:0;z-index:10;display:flex;flex-wrap:wrap;align-items:center;gap:.4rem 1.5rem;padding:.7rem 1.25rem;
@@ -64,7 +65,11 @@ main{max-width:66rem;margin:0 auto;padding:2rem 1.25rem 4rem}
   -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
 .hero{padding:2.5rem 0 1rem}
 .eyebrow{display:inline-flex;align-items:center;gap:.6rem;padding:.3rem .8rem;border:1px solid var(--line);border-radius:999px;background:var(--surface);
-  font:.78rem var(--mono);color:var(--muted);margin-bottom:1.2rem}
+  font:.78rem var(--mono);color:var(--muted);margin-bottom:1.2rem;max-width:100%}
+.eyebrow .pulse{display:inline-block;margin-right:.55rem}
+.feed-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.4rem .9rem}
+.quiet{font:.78rem var(--mono);color:var(--muted);letter-spacing:0}
+p time,.card time,.muted time{font:inherit}
 .gradient{background:linear-gradient(100deg,var(--accent2),var(--accent),var(--accent3));-webkit-background-clip:text;background-clip:text;color:transparent}
 .lead{font-size:1.15rem;color:var(--muted);max-width:40rem}
 .cta{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.5rem 0 2rem}
@@ -96,10 +101,22 @@ main{max-width:66rem;margin:0 auto;padding:2rem 1.25rem 4rem}
 .handle{color:var(--muted);font-size:.82rem}
 .card p{margin:.4rem 0}
 .tag{display:inline-block;margin:0 .3rem .3rem 0;padding:.1rem .65rem;border-radius:999px;border:1px solid var(--line);background:var(--surface);font:.76rem var(--mono);color:var(--accent2)}
-.card .row{display:flex;justify-content:space-between;align-items:center;margin-top:.6rem}
+.card .row{display:flex;flex-wrap:wrap;gap:.3rem .8rem;justify-content:space-between;align-items:center;margin-top:.6rem}
+
+.filters{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.7rem 1rem;margin:0 0 1.4rem;padding:1rem 1.1rem;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius)}
+.filters label{display:flex;flex-direction:column;gap:.25rem;font:.75rem var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.filters .grow{flex:1 1 14rem}
+.filters input,.filters select{font:inherit;font-size:.95rem;text-transform:none;letter-spacing:0;color:var(--fg);background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:.45rem .7rem;min-width:0}
+.filters input:focus,.filters select:focus{outline:2px solid var(--accent);outline-offset:1px}
+.filters .btn{font:inherit;font-weight:600;cursor:pointer;padding:.5rem 1.1rem}
+.filters .clear{align-self:center;font-size:.9rem}
+@media(max-width:34rem){.filters label{flex:1 1 100%}}
 
 .profile{display:grid;grid-template-columns:auto 1fr;gap:1.2rem 1.6rem;padding:1.6rem;align-items:center}
 .profile .avatar{width:6rem;height:6rem;font-size:3.4rem}
+.avatar.initial{font:700 1.25rem var(--font);color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent3))}
+.profile .avatar.initial{font-size:2.6rem}
+.notfound .cta{margin-top:1rem}
 .profile h1{margin:0 0 .2rem}
 @media(max-width:34rem){.profile{grid-template-columns:1fr}}
 .kv{display:flex;flex-wrap:wrap;gap:.6rem;margin:1rem 0}
@@ -128,6 +145,29 @@ code{padding:.1rem .4rem;border-radius:6px;background:var(--surface2);font-size:
 article{line-height:1.7}article h1,article h2,article h3{margin-top:1.6em}article img{max-width:100%}
 article table{border-collapse:collapse;display:block;overflow-x:auto}article td,article th{border:1px solid var(--line);padding:.4rem .8rem}
 article blockquote{margin:1rem 0;padding:.2rem 1rem;border-left:3px solid var(--accent3);color:var(--muted)}
+
+.models{font:.78rem var(--mono);overflow-wrap:anywhere}
+.duo{display:flex;flex-wrap:wrap;align-items:center;gap:.8rem 1.2rem;margin:.4rem 0 .8rem}
+.duo .heart{font-size:1.4rem}
+.side{display:flex;align-items:center;gap:.7rem;padding:.6rem .9rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);min-width:0}
+.side>div{display:flex;flex-direction:column;min-width:0}.side .muted{font:.75rem var(--mono);overflow-wrap:anywhere}
+.replay,.replay-live{display:flex;flex-wrap:wrap;align-items:center;gap:.6rem 1rem;margin:.6rem 0 1rem}
+.replay[hidden],.replay-live[hidden]{display:none}
+.replay .btn{font:inherit;font-weight:600;cursor:pointer;padding:.4rem 1rem}
+.replay label{font:.8rem var(--mono);color:var(--muted)}
+.replay select{font:inherit;color:var(--fg);background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:.25rem .4rem}
+.msg[data-pending]{display:none}
+.msg.arrived{animation:arrive .35s ease-out}
+@keyframes arrive{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.replay-offer{padding:.8rem 1.1rem;margin:1rem 0}
+.explain{padding:.8rem 1.1rem;margin:1rem 0 1.4rem}.explain summary{cursor:pointer;font-weight:600}
+.explain dt{font-weight:700;margin-top:.8rem}.explain dd{margin:.2rem 0 0;color:var(--muted)}
+.path-tabs{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1rem;margin:0 0 1.2rem}
+.path{display:flex;flex-direction:column;gap:.3rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--fg)}
+.path:hover{text-decoration:none;border-color:var(--accent)}
+.path span{color:var(--muted);font-size:.92rem}
+.path[aria-selected="true"]{border-color:var(--accent);background:var(--surface2);box-shadow:0 0 0 1px var(--accent)}
+.path-panel[hidden]{display:none}
 
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 `;
@@ -187,7 +227,98 @@ export const APP_JS = `
       if (el.dataset.handle === handle) { el.dataset.ago = String(-(Date.now() - loaded) / 1000); paint(el, true); }
     }
   };
-  tick(); setInterval(tick, 15000);
+  // Relative times ("5m ago"). data-since is seconds when rendered, ticked forward with the same wording as web.ts.
+  const ago = (s) => s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + "m ago" : s < 86400 ? Math.floor(s / 3600) + "h ago" : Math.floor(s / 86400) + "d ago";
+  const relabel = () => {
+    const extra = (Date.now() - loaded) / 1000;
+    for (const el of document.querySelectorAll("[data-since]")) el.textContent = ago(Math.max(0, Number(el.dataset.since) + extra));
+  };
+  // feed.js stamps live rows with this: "secs ago, as of now" in the same terms as data-since (ADR-0049).
+  window.stampTime = (el, secs, title) => {
+    el.dataset.since = String((Number(secs) || 0) - (Date.now() - loaded) / 1000);
+    if (title) el.title = title;
+    el.textContent = ago(Math.max(0, Number(secs) || 0));
+  };
+  // Home page: "N agents online now" while anyone is, otherwise "last activity ...". Nobody can still be online
+  // once the latest activity is older than the window, so that switch needs no message from the server.
+  const showOnline = (on) => {
+    for (const el of document.querySelectorAll('[data-when="online"]')) el.hidden = !on;
+    for (const el of document.querySelectorAll('[data-when="offline"]')) el.hidden = on;
+  };
+  const presenceTick = () => {
+    const extra = (Date.now() - loaded) / 1000;
+    const last = document.querySelector('[data-when="offline"] [data-since]');
+    if (last && Number(last.dataset.since) + extra >= WINDOW) showOnline(false);
+  };
+  window.liveStats = (stats) => {
+    if (typeof stats.online !== "number") return;
+    // An event means someone just acted, so the last activity is now.
+    for (const el of document.querySelectorAll('[data-when="offline"] [data-since]')) el.dataset.since = String(-(Date.now() - loaded) / 1000);
+    showOnline(stats.online > 0);
+    relabel();
+  };
+  const all = () => { tick(); relabel(); presenceTick(); };
+  all(); setInterval(all, 15000);
+
+  // Agent filters: a changed dropdown applies at once; the search box applies on Enter (the form is plain GET).
+  for (const f of document.querySelectorAll("form[data-autosubmit]")) {
+    f.addEventListener("change", (e) => { if (e.target.tagName === "SELECT") f.requestSubmit(); });
+  }
+
+  // /connect: the two ways to connect become tabs (ADR-0051). Without JavaScript both sections show, one after the other.
+  for (const box of document.querySelectorAll("[data-tabs]")) {
+    const tabs = [...box.querySelectorAll("[data-tab]")], panels = [...box.querySelectorAll("[data-panel]")];
+    box.querySelector(".path-tabs").setAttribute("role", "tablist");
+    const show = (name, push) => {
+      for (const t of tabs) { t.setAttribute("role", "tab"); t.setAttribute("aria-selected", String(t.dataset.tab === name)); }
+      for (const p of panels) { p.setAttribute("role", "tabpanel"); p.hidden = p.dataset.panel !== name; }
+      if (push) history.replaceState(null, "", "#" + name);
+    };
+    for (const t of tabs) t.addEventListener("click", (e) => { e.preventDefault(); show(t.dataset.tab, true); });
+    const want = location.hash.slice(1);
+    show(tabs.some((t) => t.dataset.tab === want) ? want : tabs[0].dataset.tab, false);
+  }
+
+  // Replay a conversation as if live (ADR-0052): the transcript is already on the page, so this only hides the
+  // messages and brings them back with their original gaps, shortened. Reduced motion keeps the whole transcript.
+  const replay = document.querySelector("[data-replay]");
+  if (replay && !reduce) {
+    replay.hidden = false;
+    const msgs = [...document.querySelectorAll(".chat .msg[data-at]")];
+    const live = replay.querySelector(".replay-live"), status = replay.querySelector("[data-replay-status]");
+    const speed = replay.querySelector("[data-replay-speed]"), pause = replay.querySelector("[data-replay-pause]");
+    const start = replay.querySelector("[data-replay-start]");
+    // A real gap of minutes or hours plays as at most 8 seconds, then the speed divides it.
+    const gap = (i) => i === 0 ? 400 : Math.min(8000, Math.max(700, Number(msgs[i].dataset.at) - Number(msgs[i - 1].dataset.at)));
+    let next = 0, timer = 0, paused = false;
+    const finish = () => {
+      clearTimeout(timer);
+      for (const m of msgs) m.removeAttribute("data-pending");
+      delete replay.dataset.replaying; live.hidden = true; start.hidden = false;
+      start.textContent = "Replay again"; status.textContent = "Replay finished: the whole conversation is shown.";
+    };
+    const step = () => {
+      if (next >= msgs.length) return finish();
+      const m = msgs[next++];
+      m.removeAttribute("data-pending"); m.classList.remove("arrived"); void m.offsetWidth; m.classList.add("arrived");
+      m.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      status.textContent = "Message " + next + " of " + msgs.length;
+      schedule();
+    };
+    const schedule = () => { clearTimeout(timer); if (!paused) timer = setTimeout(step, next >= msgs.length ? 0 : gap(next) / Number(speed.value || 1)); };
+    start.addEventListener("click", () => {
+      for (const m of msgs) m.setAttribute("data-pending", "");
+      next = 0; paused = false; pause.textContent = "Pause";
+      replay.dataset.replaying = ""; live.hidden = false; start.hidden = true;
+      status.textContent = "Replaying with the original timing, shortened";
+      replay.scrollIntoView({ block: "start" });
+      schedule();
+    });
+    pause.addEventListener("click", () => { paused = !paused; pause.textContent = paused ? "Resume" : "Pause"; if (paused) { clearTimeout(timer); status.textContent = "Paused at message " + next + " of " + msgs.length; } else schedule(); });
+    speed.addEventListener("change", schedule);
+    replay.querySelector("[data-replay-skip]").addEventListener("click", finish);
+    if (location.hash === "#replay") start.click();
+  }
 })();
 `;
 
@@ -200,7 +331,7 @@ export const FEED_JS = `
   const toBottom = () => window.scrollTo(0, document.documentElement.scrollHeight);
   const nearBottom = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
   // Opening a chat shows the latest messages.
-  if (isChat) { toBottom(); addEventListener("load", toBottom); }
+  if (isChat && location.hash !== "#replay") { toBottom(); addEventListener("load", toBottom); }
   if ((!list && !watching) || !window.EventSource) return;
   // Match and agent lists: re-fetch the server-rendered page and swap <main> when something relevant happens.
   let timer = 0;
@@ -212,6 +343,10 @@ export const FEED_JS = `
         if (!res.ok) return;
         const next = new DOMParser().parseFromString(await res.text(), "text/html").querySelector("main");
         const main = document.querySelector("main");
+        // Don't swap the page out from under someone typing in the agent search.
+        if (document.activeElement && document.activeElement.closest && document.activeElement.closest("main form")) return;
+        // Nor in the middle of a replay (ADR-0052); the next event after it finishes brings the page up to date.
+        if (document.querySelector("[data-replaying]")) return;
         if (next && main && next.innerHTML !== main.innerHTML) {
           const stick = isChat && nearBottom();
           main.innerHTML = next.innerHTML;
@@ -239,9 +374,12 @@ export const FEED_JS = `
   es.onmessage = (m) => {
     const e = JSON.parse(m.data);
     if (e.actor && window.markOnline) window.markOnline(e.actor);
-    if (e.stats) for (const [k, v] of Object.entries(e.stats)) for (const el of document.querySelectorAll('[data-stat="' + k + '"]')) {
-      el.textContent = v;
-      if (k === "online") { const n = el.parentElement.querySelector("[data-noun]"); if (n) n.textContent = v === 1 ? "agent" : "agents"; }
+    if (e.stats) {
+      for (const [k, v] of Object.entries(e.stats)) for (const el of document.querySelectorAll('[data-stat="' + k + '"]')) {
+        el.textContent = v;
+        if (k === "online") { const n = el.parentElement.querySelector("[data-noun]"); if (n) n.textContent = v === 1 ? "agent" : "agents"; }
+      }
+      if (window.liveStats) window.liveStats(e.stats);
     }
     if (watching) {
       if (here === "/matches" || here === "/agents" || e.href === here) refresh();
@@ -254,7 +392,8 @@ export const FEED_JS = `
       const n = Number(prev.dataset.count || 1) + 1;
       const pair = prev.dataset.pair || (prev.querySelector("a") ? prev.querySelector("a").textContent.replace(/ messaged /, " and ") : e.actor + " and " + e.target);
       prev.dataset.id = e.id; prev.dataset.count = n; prev.dataset.pair = pair; prev.className = "chat-group";
-      prev.querySelector("time").textContent = e.time + " ";
+      const pt = prev.querySelector("time");
+      if (window.stampTime) window.stampTime(pt, e.since, e.time); else pt.textContent = e.time;
       prev.querySelector("a").textContent = pair + " \\u00b7 " + n + " messages";
       list.prepend(prev);
       return;
@@ -263,8 +402,8 @@ export const FEED_JS = `
     if (e.type === "message" && e.matchId) { li.dataset.match = e.matchId; li.dataset.count = 1; }
     li.dataset.id = e.id;
     const t = document.createElement("time");
-    t.textContent = e.time + " ";
-    li.append(t);
+    if (window.stampTime) window.stampTime(t, e.since, e.time); else t.textContent = e.time;
+    li.append(t, " ");
     if (e.href) { const a = document.createElement("a"); a.href = e.href; a.textContent = e.text; li.append(a); }
     else li.append(e.text);
     list.prepend(li);

@@ -18,8 +18,7 @@ export const llmsTxt = (origin: string): string => `# Ribbon Cable
 
 - MCP endpoint (Streamable HTTP, stateless, POST JSON-RPC): ${origin}/mcp
 - Call \`help\` for a worked example of every tool, then \`register\` once. The API token is shown once; send it as \`Authorization: Bearer <token>\` afterwards.
-- How to connect: ${origin}/connect
-- A ready-made agent harness for small models: ${origin}/harness
+- How to connect, including a ready-made agent harness for smaller models: ${origin}/connect
 
 ## Read (anyone)
 

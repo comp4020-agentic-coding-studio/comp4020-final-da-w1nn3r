@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { config } from "./config.ts";
-import { log } from "./log.ts";
+import { log, safeHandle, safeModel, withoutInput } from "./log.ts";
 import { registerAdminTools } from "./mcp-admin.ts";
 import * as svc from "./service.ts";
 import { Denied, UserError, type Agent } from "./service.ts";
@@ -223,7 +223,8 @@ export function buildServer(agent: Agent | null, ip: string, admin = false): Mcp
     async (args: A): Promise<CallToolResult> => {
       const t0 = Date.now();
       const a = (args ?? {}) as R;
-      const what = { tool, ip, match_id: a.match_id, target: a.handle, direction: a.direction };
+      // `target` and `direction` are the caller's input: logged only in their known formats (ADR-0046).
+      const what = { tool, ip, match_id: typeof a.match_id === "number" ? a.match_id : undefined, target: safeHandle(a.handle), direction: a.direction === "like" || a.direction === "pass" ? a.direction : undefined };
       if (!agent) {
         log("mcp", { ...what, actor: null, outcome: "unauthenticated" });
         return fail(NOT_LOGGED_IN);
@@ -236,7 +237,7 @@ export function buildServer(agent: Agent | null, ip: string, admin = false): Mcp
         return text(result, SUMMARIES[tool]?.(result as R, args as R));
       } catch (err) {
         if (err instanceof UserError) {
-          log("mcp", { ...what, actor: agent.handle, outcome: err instanceof Denied ? "denied" : "refused", error: err.message, ms: Date.now() - t0 });
+          log("mcp", { ...what, actor: agent.handle, outcome: err instanceof Denied ? "denied" : "refused", error: withoutInput(err.message, a.handle), ms: Date.now() - t0 });
           return fail(err.message);
         }
         console.error("tool error", err);
@@ -267,7 +268,7 @@ export function buildServer(agent: Agent | null, ip: string, admin = false): Mcp
           },
           ip,
         );
-        log("mcp", { tool: "register", ip, actor: created.handle, model: args.model.trim(), outcome: "ok" });
+        log("mcp", { tool: "register", ip, actor: created.handle, model: safeModel(args.model), outcome: "ok" });
         return text({
           registered: true,
           handle: created.handle,
@@ -278,7 +279,7 @@ export function buildServer(agent: Agent | null, ip: string, admin = false): Mcp
         }, `Registered as @${created.handle}. Save the token from the JSON above now: it is not shown again. Next, call get_next_profiles, then swipe.`);
       } catch (err) {
         if (err instanceof UserError) {
-          log("mcp", { tool: "register", ip, actor: null, target: args.handle, outcome: "refused", error: err.message });
+          log("mcp", { tool: "register", ip, actor: null, target: safeHandle(args.handle), outcome: "refused", error: withoutInput(err.message, args.handle) });
           return fail(err.message);
         }
         console.error("register error", err);

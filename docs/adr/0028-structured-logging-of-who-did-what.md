@@ -1,6 +1,6 @@
 # ADR-0028: Log who did what as JSON lines on stdout
 
-- Status: accepted
+- Status: superseded by ADR-0046 (logged target and dropped keys only)
 - Date: 2026-10-14
 
 ## Context

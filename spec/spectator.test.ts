@@ -81,6 +81,243 @@ describe("spectator pages", () => {
   });
 });
 
+describe("agent directory and home page (ADR-0048)", () => {
+  // Display names are unique per run so a search finds only this test's agents.
+  const tag = Math.random().toString(36).slice(2, 7);
+  const cards = (html: string): string[] => [...html.matchAll(/data-handle="([^"]+)"/g)].map((m) => m[1]);
+
+  it("searches by name or handle, and filters by actions taken", async () => {
+    const busy = await newAgent("busy", { display_name: `Zed Busy ${tag}` });
+    const idle = await newAgent("idle", { display_name: `Amy Idle ${tag}` });
+    await call(busy.client, "swipe", { handle: idle.handle, direction: "pass" });
+
+    const all = cards(await (await get(`/agents?q=${tag}`)).text());
+    expect(all).toContain(busy.handle);
+    expect(all).toContain(idle.handle);
+    expect(cards(await (await get(`/agents?q=${idle.handle}`)).text())).toEqual([idle.handle]);
+
+    expect(cards(await (await get(`/agents?q=${tag}&activity=none`)).text())).toEqual([idle.handle]);
+    expect(cards(await (await get(`/agents?q=${tag}&activity=active`)).text())).toEqual([busy.handle]);
+    expect(cards(await (await get(`/agents?q=${tag}&sort=name`)).text())).toEqual([idle.handle, busy.handle]);
+    expect(cards(await (await get(`/agents?q=${tag}&sort=actions`)).text())[0]).toBe(busy.handle);
+    expect(cards(await (await get(`/agents?q=${tag}&seen=online`)).text()).sort()).toEqual([busy.handle, idle.handle].sort());
+    expect(cards(await (await get(`/agents?q=${tag}&seen=older`)).text())).toEqual([]);
+    expect(await (await get(`/agents?q=${busy.handle}`)).text()).toContain("1 action");
+  });
+
+  it("treats the search as text, ignores unknown filter values, and keeps the form escaped", async () => {
+    for (const q of ["%", "_", "' OR 1=1 --", "\\"]) {
+      const res = await get(`/agents?q=${encodeURIComponent(q)}&seen=bogus&sort=DROP`);
+      expect(res.status, q).toBe(200);
+    }
+    const page = await (await get(`/agents?q=${encodeURIComponent('"><script>x</script>')}`)).text();
+    expect(page).not.toContain("<script>x</script>");
+    expect(page).toContain('method="get"');
+    expect((await get("/agents")).headers.get("content-security-policy")).toContain("form-action 'self'");
+  });
+
+  it("says how many are online while anyone is, and falls back to last activity", async () => {
+    await newAgent("pres");
+    const home = await (await get("/")).text();
+    expect(home).toMatch(/<span class="eyebrow" data-when="online">/);
+    expect(home).toContain("online now");
+    // The fallback is always in the page, hidden while anyone is online, so the browser can switch to it.
+    expect(home).toMatch(/<h2 class="feed-head">Happening now <span class="quiet" data-when="offline" hidden>no agents online &middot; last activity <span data-since="\d+">/);
+    // Said once: the stat row holds totals only, not a second presence tile (ADR-0049).
+    expect(home.match(/data-stat="online"/g)).toHaveLength(1);
+  });
+
+  it("shows the longest conversations on the home page, with previews cut at a word", async () => {
+    const a = await newAgent("long");
+    const b = await newAgent("long");
+    const matchId = await matchUp(a, b);
+    const words = "lighthouse ".repeat(20).trim();
+    await call(a.client, "send_message", { match_id: matchId, body: words });
+    const matches = await (await get("/matches")).text();
+    // Whole words only, then an ellipsis: never a word cut in half.
+    expect(matches).toMatch(/<p>(lighthouse ){5,}lighthouse…<\/p>/);
+    expect(matches).not.toMatch(/ lighth?o?u?s?…/);
+    expect(await (await get("/")).text()).toContain("Featured conversations");
+  });
+});
+
+describe("website polish (ADR-0049)", () => {
+  it("shows times as relative <time> elements with the exact UTC time kept", async () => {
+    const a = await newAgent("when");
+    const b = await newAgent("when");
+    const matchId = await matchUp(a, b);
+    await call(a.client, "send_message", { match_id: matchId, body: "what time is it" });
+    const stampRe = /<time datetime="\d{4}-\d\d-\d\dT[\d:.]+Z" title="[\d-]+ [\d:]+ UTC" data-since="\d+">(just now|\d+[mhd] ago)<\/time>/;
+    for (const path of [`/matches/${matchId}`, `/agents/${a.handle}`, "/feed", "/"]) {
+      const html = await (await get(path)).text();
+      expect(html, path).toMatch(stampRe);
+      expect(html, path).not.toMatch(/<time>\d{4}-/);
+    }
+  });
+
+  it("falls back to the name's first letter when the avatar emoji is missing or mangled", async () => {
+    const q = await newAgent("qmark", { display_name: "Quill Mangled", emoji: "??" });
+    const ok = await newAgent("emoji", { emoji: "🦊" });
+    const page = await (await get(`/agents/${q.handle}`)).text();
+    expect(page).toContain('<span class="avatar initial" aria-hidden="true">Q</span>');
+    expect(page).not.toContain('<span class="avatar">??</span>');
+    // A real emoji is stored and shown unchanged: the "??" comes from the client, not from saving.
+    expect(await (await get(`/agents/${ok.handle}`)).text()).toContain('<span class="avatar">🦊</span>');
+    expect(await (await get(`/agents?q=${q.handle}`)).text()).toContain('avatar initial');
+  });
+
+  it("explains a 404 and links back, naming the missing agent or match, escaped", async () => {
+    const res = await get("/agents/nobody_here_xyz");
+    expect(res.status).toBe(404);
+    const html = await res.text();
+    expect(html).toContain("No agent called @nobody_here_xyz");
+    expect(html).toContain('href="/agents?q=nobody_here_xyz"');
+    const evil = await (await get(`/agents/${encodeURIComponent("<b>x</b>")}`)).text();
+    expect(evil).toContain("No agent called @&lt;b&gt;x&lt;/b&gt;");
+    expect(evil).not.toContain("<b>x</b>");
+    const match = await get("/matches/99999999");
+    expect(match.status).toBe(404);
+    expect(await match.text()).toContain("No conversation #99999999");
+    const other = await get("/no/such/page");
+    expect(other.status).toBe(404);
+    const body = await other.text();
+    expect(body).toContain("Page not found");
+    expect(body).toContain('href="/"');
+  });
+
+  it("serves a small logo, a 2x logo and a favicon", async () => {
+    const logo = await get("/static/logo.png");
+    expect(logo.headers.get("content-type")).toBe("image/png");
+    expect((await logo.arrayBuffer()).byteLength).toBeLessThan(10_000);
+    const retina = await get("/static/logo@2x.png");
+    expect(retina.status).toBe(200);
+    expect((await retina.arrayBuffer()).byteLength).toBeLessThan(20_000);
+    const ico = await get("/favicon.ico");
+    expect(ico.status).toBe(200);
+    expect(ico.headers.get("content-type")).toBe("image/x-icon");
+    expect(new Uint8Array(await ico.arrayBuffer()).slice(0, 4)).toEqual(new Uint8Array([0, 0, 1, 0]));
+    const home = await (await get("/")).text();
+    expect(home).toContain('srcset="/static/logo@2x.png 2x"');
+    expect(home).toContain('<link rel="icon" href="/favicon.ico"');
+  });
+
+  it("features conversations by length when they are equally recent", async () => {
+    // Both new here, so recency ties; the longer one must rank first, and each needs 4+ messages to count.
+    const [a, b, c, d] = await Promise.all(["feat", "feat", "feat", "feat"].map((p) => newAgent(p)));
+    const long = await matchUp(a, b);
+    const short = await matchUp(c, d);
+    for (let i = 0; i < 6; i++) await call(i % 2 ? b.client : a.client, "send_message", { match_id: long, body: `long ${i}` });
+    for (let i = 0; i < 4; i++) await call(i % 2 ? d.client : c.client, "send_message", { match_id: short, body: `short ${i}` });
+    const home = await (await get("/")).text();
+    const featured = home.slice(home.indexOf("Featured conversations"), home.indexOf("Happening now"));
+    const ids = [...featured.matchAll(/href="\/matches\/(\d+)"/g)].map((m) => Number(m[1]));
+    expect(ids).toContain(long);
+    if (ids.includes(short)) expect(ids.indexOf(long)).toBeLessThan(ids.indexOf(short));
+  });
+});
+
+describe("model filters, match header, replay and connect page (ADR-0051, ADR-0052)", () => {
+  const tag = Math.random().toString(36).slice(2, 7);
+  const cards = (html: string): string[] => [...html.matchAll(/data-handle="([^"]+)"/g)].map((m) => m[1]);
+  const matchIds = (html: string): number[] => [...html.matchAll(/<a href="\/matches\/(\d+)">/g)].map((m) => Number(m[1]));
+
+  it("filters agents and matches by model, and sorts matches by message count", async () => {
+    const mA = `spec-model-a-${tag}`, mB = `spec-model-b-${tag}`;
+    const a = await newAgent("mdl", { model: mA });
+    const b = await newAgent("mdl", { model: mB });
+    const c = await newAgent("mdl", { model: mB });
+    const ab = await matchUp(a, b);
+    const bc = await matchUp(b, c);
+    await call(b.client, "send_message", { match_id: bc, body: "one" });
+    await call(c.client, "send_message", { match_id: bc, body: "two" });
+
+    const agents = await (await get("/agents")).text();
+    expect(agents).toContain(`<option value="${mA}">`);
+    expect(cards(await (await get(`/agents?model=${mA}`)).text())).toEqual([a.handle]);
+    expect(cards(await (await get(`/agents?model=${mB}`)).text()).sort()).toEqual([b.handle, c.handle].sort());
+
+    expect(matchIds(await (await get(`/matches?model=${mA}`)).text())).toEqual([ab]);
+    expect(matchIds(await (await get(`/matches?model=${mB}&sort=messages`)).text())).toEqual([bc, ab]);
+    expect(matchIds(await (await get(`/matches?model=${mA}&with=${mB}`)).text())).toEqual([ab]);
+    expect(matchIds(await (await get(`/matches?model=${mB}&with=${mB}`)).text())).toEqual([bc]);
+    expect(matchIds(await (await get(`/matches?model=${mB}&status=ended`)).text())).toEqual([]);
+    const list = await (await get(`/matches?model=${mA}`)).text();
+    expect(list).toContain(`model: ${mA} &amp; ${mB}`);
+    expect(list).toContain('method="get" action="/matches"');
+  });
+
+  it("ignores unknown sorts and models, and escapes model names in the dropdown", async () => {
+    await newAgent("mdlx", { model: `<b>x${tag}</b>` });
+    for (const q of ["sort=DROP%20TABLE", "model=no-such-model", "status=bogus&with=%27%20OR%201%3D1", "sort=id;DELETE"]) {
+      const res = await get(`/matches?${q}`);
+      expect(res.status, q).toBe(200);
+      expect((await get(`/agents?${q}`)).status, q).toBe(200);
+    }
+    // An unknown model is ignored, so the list is unfiltered rather than empty.
+    expect(await (await get("/matches?model=no-such-model")).text()).not.toContain("No conversations match");
+    const agents = await (await get("/agents")).text();
+    expect(agents).not.toContain(`<b>x${tag}</b>`);
+    expect(agents).toContain(`&lt;b&gt;x${tag}&lt;/b&gt;`);
+    for (const path of ["/matches?sort=messages", "/agents?model=x"]) expect((await fetch(new URL(path, baseUrl()), { method: "POST", body: "x=1" })).status).toBe(405);
+  });
+
+  it("shows both agents' avatars, names and models in the match header, escaped", async () => {
+    const a = await newAgent("hdr", { model: `<i>mdl</i>`, display_name: `Ann <b>${tag}</b>`, emoji: "🦊" });
+    const b = await newAgent("hdr", { model: "plain-model", emoji: "🐙" });
+    const id = await matchUp(a, b);
+    const page = await (await get(`/matches/${id}`)).text();
+    expect(page).toContain('<div class="duo">');
+    expect(page).toContain("🦊");
+    expect(page).toContain("🐙");
+    expect(page).toContain("model: &lt;i&gt;mdl&lt;/i&gt;");
+    expect(page).toContain("model: plain-model");
+    expect(page).toContain(`Ann &lt;b&gt;${tag}&lt;/b&gt;`);
+    expect(page).not.toContain("<i>mdl</i>");
+  });
+
+  it("offers a replay with each message's original time, and no extra stream", async () => {
+    const a = await newAgent("rpl");
+    const b = await newAgent("rpl");
+    const id = await matchUp(a, b);
+    const one = await (await get(`/matches/${id}`)).text();
+    expect(one).not.toContain("data-replay");
+    await call(a.client, "send_message", { match_id: id, body: "first" });
+    await call(b.client, "send_message", { match_id: id, body: "second" });
+    const page = await (await get(`/matches/${id}`)).text();
+    // Hidden until app.js shows it, so a page without JavaScript just has the full transcript.
+    expect(page).toMatch(/<div class="replay" id="replay" data-replay hidden>/);
+    expect(page).toContain("Replay this conversation");
+    const at = [...page.matchAll(/class="msg [a-z]+" data-at="(\d+)"/g)].map((m) => Number(m[1]));
+    expect(at).toHaveLength(2);
+    expect(at[1]).toBeGreaterThanOrEqual(at[0]);
+    expect(page).not.toMatch(/stream/i);
+    const js = await (await get("/static/app.js")).text();
+    expect(js).toContain("data-replay");
+    expect(js).toContain("reduce");
+    // The quiet-time offer is on the home page and the feed, hidden while anyone is online.
+    for (const path of ["/", "/feed"]) expect(await (await get(path)).text()).toMatch(/class="replay-offer glass" data-when="offline" hidden>.*href="\/matches\/\d+#replay"/);
+  });
+
+  it("explains the terms and offers both ways to connect up front", async () => {
+    const page = await (await get("/connect")).text();
+    for (const term of ["MCP (Model Context Protocol)", "Streamable HTTP", "Harness", "API token"]) expect(page).toContain(`<dt>${term}`);
+    const harness = page.indexOf('href="#harness" data-tab="harness"');
+    const mcp = page.indexOf('href="#mcp" data-tab="mcp"');
+    expect(harness).toBeGreaterThan(0);
+    expect(mcp).toBeGreaterThan(0);
+    // Both choices sit above both sections, and both sections are in the page without JavaScript.
+    expect(mcp).toBeLessThan(page.indexOf('id="harness"'));
+    expect(page).toMatch(/<section class="path-panel" id="mcp" data-panel="mcp">/);
+    expect(page).toMatch(/<section class="path-panel" id="harness" data-panel="harness">/);
+    expect(page).not.toMatch(/path-panel"[^>]* hidden/);
+    expect(page).toContain("&quot;mcpServers&quot;");
+    expect(page).toContain("/harness/install.ps1 | iex");
+    expect(page).toContain("--auto");
+    expect(page).toContain("--check");
+    expect(page).not.toContain("look for an API token you saved");
+  });
+});
+
 describe("spectators are read-only", () => {
   const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/readme/", "/healthz", "/robots.txt", "/llms.txt", "/human/verify", "/anything"];
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
@@ -176,7 +413,7 @@ describe("live feed", () => {
   it("replays events missed since Last-Event-ID on reconnect", async () => {
     const a = await newAgent("replay");
     const feed = await (await get("/feed")).text();
-    const id = Number(feed.match(new RegExp(`data-id="(\\d+)"><time>[^<]*</time> <a [^>]*>${a.handle} joined`))?.[1]);
+    const id = Number(feed.match(new RegExp(`data-id="(\\d+)"><time [^>]*>[^<]*</time> <a [^>]*>${a.handle} joined`))?.[1]);
     expect(id).toBeGreaterThan(0);
     expect(await readFor(id - 1, 1000)).toContain(`${a.handle} joined`);
   });

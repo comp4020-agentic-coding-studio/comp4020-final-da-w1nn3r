@@ -1,4 +1,5 @@
-import { chat, type Msg } from "./llm.ts";
+import { BUDGET, chat, DEFAULT_MAX_TOKENS, type ChatOptions, type Msg } from "./llm.ts";
+import { FALLBACK_CONTEXT } from "./context.ts";
 import { cleanHandle, readPerson, savePerson } from "./memory.ts";
 import type { ModelProfile, Settings } from "./settings.ts";
 
@@ -8,16 +9,23 @@ import type { ModelProfile, Settings } from "./settings.ts";
 
 export const approxTokens = (s: string): number => Math.ceil(s.length / 3.5);
 
+/** The window in tokens: main.ts replaces "auto" with what the server reported (ADR-0055); before that, the fallback. */
+export const windowOf = (s: Pick<Settings, "contextTokens">): number => (typeof s.contextTokens === "number" && s.contextTokens > 0 ? s.contextTokens : FALLBACK_CONTEXT);
+
 export interface Compaction { enabled: boolean; reserveTokens: number; keepRecentTokens: number; model?: string }
 
-/** Settings with defaults sized to the window: Pi's 16K/20K would swallow a 40K context. */
-export function compactionSettings(s: Pick<Settings, "contextTokens" | "compaction">): Compaction {
+/**
+ * Settings with defaults sized to the window: Pi's 16K/20K would swallow a 40K context. The default reserve is
+ * at least the room a reply may take (maxTokens plus the thinking budget, ADR-0055), so prompt plus reply fit the
+ * server's window, but never more than a third of it.
+ */
+export function compactionSettings(s: Pick<Settings, "contextTokens" | "compaction"> & Partial<Pick<Settings, "maxTokens" | "thinking">>): Compaction {
   const c = s.compaction ?? {};
   const num = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : d);
   return {
     enabled: c.enabled !== false,
-    reserveTokens: num(c.reserveTokens, 3000),
-    keepRecentTokens: num(c.keepRecentTokens, Math.floor(s.contextTokens * 0.25)),
+    reserveTokens: num(c.reserveTokens, Math.min(Math.max(3000, (s.maxTokens ?? DEFAULT_MAX_TOKENS) + BUDGET[s.thinking ?? "off"]), Math.floor(windowOf(s) / 3))),
+    keepRecentTokens: num(c.keepRecentTokens, Math.floor(windowOf(s) * 0.25)),
     model: c.model,
   };
 }
@@ -84,8 +92,8 @@ export function summaryPrompt(msgs: Msg[], previous: string, instructions?: stri
 }
 
 /** Ask the model for the summary. Throws when it cannot, or returns nothing usable. */
-export async function summarize(profile: ModelProfile, msgs: Msg[], previous: string, instructions?: string): Promise<string> {
-  const got = await chat(profile, SUMMARY_SYSTEM, [{ role: "user", content: summaryPrompt(msgs, previous, instructions) }], "off");
+export async function summarize(profile: ModelProfile, msgs: Msg[], previous: string, instructions?: string, opts: ChatOptions = {}): Promise<string> {
+  const got = await chat(profile, SUMMARY_SYSTEM, [{ role: "user", content: summaryPrompt(msgs, previous, instructions) }], "off", undefined, opts);
   const text = got.text.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
   if (text.length < 20) throw new Error("the model returned an empty summary");
   return text.slice(0, MAX_SUMMARY_CHARS);
@@ -128,11 +136,11 @@ export function parsePeople(text: string, asked: string[]): Record<string, strin
 }
 
 /** Update the note of everyone mentioned in `msgs`. Returns their handles. Throws if the model cannot be reached. */
-export async function updatePeople(profile: ModelProfile, msgs: Msg[], own?: string): Promise<string[]> {
+export async function updatePeople(profile: ModelProfile, msgs: Msg[], own?: string, opts: ChatOptions = {}): Promise<string[]> {
   const handles = mentionedHandles(msgs, own);
   if (!handles.length) return [];
   const existing = Object.fromEntries(handles.map((h) => [h, readPerson(h)]));
-  const got = await chat(profile, PEOPLE_SYSTEM, [{ role: "user", content: peoplePrompt(msgs, handles, existing) }], "off");
+  const got = await chat(profile, PEOPLE_SYSTEM, [{ role: "user", content: peoplePrompt(msgs, handles, existing) }], "off", undefined, opts);
   if (process.env.HARNESS_DEBUG) console.error(`--- people notes asked for ${handles.join(", ")}, model said:
 ${got.text}
 ---`);

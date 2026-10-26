@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
-import { approxTokens, compactionSettings, cutPoint, summarize, updatePeople } from "./compact.ts";
-import { chat, type Kind, type Msg } from "./llm.ts";
+import { approxTokens, compactionSettings, cutPoint, summarize, updatePeople, windowOf } from "./compact.ts";
+import { Aborted, chat, DEFAULT_MAX_TOKENS, type ChatOptions, type Kind, type Msg } from "./llm.ts";
+import type { Event } from "./transcript.ts";
 import { forget, indexForPrompt, peopleForPrompt, readMemory, readPerson, remember } from "./memory.ts";
 import { findPending, type MatchInfo } from "./auto.ts";
 import { McpClient, McpError, type ToolInfo } from "./mcp.ts";
 import { modelLabel } from "./detect.ts";
+import { calibrate, CALL_PROTOCOL, DIALECTS, nativeTools, otherDialect, savedDialect, saveDialect, SWITCH_AFTER, TEXT_DIALECTS, type DialectName } from "./dialect.ts";
 import { activeProfile, clearAccount, getAccount, PERSONALITY_FILE, saveAccount, type Settings } from "./settings.ts";
 
 export const MAX_WAIT_MINUTES = 30;
@@ -13,14 +15,8 @@ export const MAX_WAIT_MINUTES = 30;
 // As simple and as strict as it gets (ADR-0042): the model writes ONE line, `CALL name key=value key=value`,
 // and the harness answers with `RESULT ...`. No JSON, no schemas, no provider-specific tool API, and no
 // guessing: what runs is exactly what the model wrote, or the model gets an error that shows the right form.
-const PROTOCOL = `To do something, write one line and nothing else:
-CALL tool_name key=value key=value
-Every argument is key=value. Put double quotes around a value with spaces (write \\" for a quote inside it). Numbers have no quotes. Write nothing after the last argument. One call per reply.
-Example: CALL swipe handle=bob direction=like
-Example: CALL send_message match_id=3 body="Hi Bob, how is your day?"
-The brackets in the tool list give limits: (max 300) is the longest text, (1-10) the allowed numbers, (like|pass) the only choices. Going over is refused.
-Then wait: I will answer with RESULT. If there is nothing to do for now, call wait instead of repeating calls.
-As soon as the task is done, stop calling tools and reply with a short summary (no CALL).`;
+// The strict protocol paragraph; the dynamic setting swaps in the model's own dialect (ADR-0047). It lives in dialect.ts.
+const PROTOCOL = CALL_PROTOCOL;
 
 const LOCAL_TOOLS: ToolInfo[] = [
   { name: "remember", description: "Save a note to your memory.", inputSchema: { properties: { name: { type: "string", minLength: 1, maxLength: 40 }, text: { type: "string", minLength: 1, maxLength: 2000 } }, required: ["name", "text"] } },
@@ -37,16 +33,36 @@ const LOCAL_TOOLS: ToolInfo[] = [
 const firstSentence = (s: string): string => (s.match(/^.*?[.!?](\s|$)/)?.[0] ?? s).trim().slice(0, 110);
 
 /** A correct call for a tool, built from its schema: required arguments only, with a plausible value for each. */
-export function exampleCall(t: ToolInfo): string {
+export function exampleCall(t: ToolInfo, dialect: DialectName = "call"): string {
+  const values: Record<string, string | number> = {};
   const props = t.inputSchema.properties ?? {};
   const words = (t.inputSchema.required ?? Object.keys(props).slice(0, 0)).map((k) => {
     const options: any[] = props[k]?.anyOf ?? [props[k] ?? {}];
     const str = options.find((s) => s.type === "string");
-    if (str?.enum?.length) return `${k}=${str.enum[0]}`;
-    if (options.some((s) => s.type === "integer" || s.type === "number")) return `${k}=3`;
+    if (str?.enum?.length) return `${k}=${(values[k] = str.enum[0])}`;
+    if (options.some((s) => s.type === "integer" || s.type === "number")) return `${k}=${(values[k] = 3)}`;
+    values[k] = "...";
     return `${k}="..."`;
   });
+  if (dialect !== "call") return TEXT_DIALECTS[dialect].format(t.name, values);
   return `CALL ${t.name}${words.length ? " " + words.join(" ") : ""}`;
+}
+
+/**
+ * Parse a reply in the agent's dialect (ADR-0047). The CALL dialect uses parseCall; the others use their own strict
+ * parser. Values come back as strings so checkArgs types them the same way for every dialect.
+ */
+export function parseIn(dialect: DialectName | undefined, reply: string, toolNames: string[]): Call | CallError | null {
+  if (!dialect || dialect === "call") return parseCall(reply, toolNames);
+  const got = TEXT_DIALECTS[dialect].parse(reply);
+  if (!got || "error" in got) {
+    if (got) return got;
+    // A model that still writes the CALL form is told which form it uses now, not silently obeyed.
+    return /^\s*CALL\s+[a-z_]/m.test(reply) ? { error: `this model's calls are written in its own format here, not CALL` } : null;
+  }
+  const args: Record<string, string> = {};
+  for (const [k, v] of Object.entries(got.args)) args[k] = typeof v === "string" ? v : typeof v === "object" ? JSON.stringify(v) : String(v);
+  return { name: got.name, args, line: got.line };
 }
 
 /** The part of an argument's schema the model needs to see: its choices, its largest length, or its range. */
@@ -242,14 +258,29 @@ export interface Agent {
   mcp: McpClient;
   tools: ToolInfo[];
   settings: Settings;
-  /** run one user turn to completion. With `live`, the model's output is shown as it is generated. */
-  say(text: string, out: (s: string) => void, live?: Live): Promise<void>;
+  /**
+   * Run one user turn to completion. With `live`, the model's output is shown as it is generated. Aborting `signal`
+   * (Ctrl-C) stops the turn where it is: the model call is cancelled and the history is closed off (ADR-0055).
+   */
+  say(text: string, out: (s: string) => void, live?: Live, signal?: AbortSignal): Promise<void>;
   refreshTools(): Promise<void>;
   setServer(url: string): Promise<void>;
   logout(): void;
   /** Summarize everything before the recent tail now. False when there was nothing to summarize or the model failed. */
   compact(out: (s: string) => void, instructions?: string, keepRecent?: number): Promise<boolean>;
+  /** Compact or trim now if the conversation is over the context budget (used after --resume). */
+  fit(out: (s: string) => void): Promise<void>;
+  /** Clear the conversation (memory and login are kept). */
+  reset(): void;
+  /** Put back a conversation read from a transcript (--resume, ADR-0056). */
+  restore(history: Msg[], summary: string): void;
+  /** Gets every change to the conversation, for the session transcript (ADR-0056). */
+  onEvent?: (e: Event) => void;
   account(): { handle: string; token: string } | undefined;
+  /** How this model writes tool calls under toolCalling "dynamic" (ADR-0047): decided once per model, then saved. Always undefined (CALL) when strict. */
+  dialect?: DialectName;
+  /** Decide (or load) this model's tool-call dialect now, without a turn. A no-op returning "call" when strict. */
+  decideDialect(out: (s: string) => void): Promise<DialectName>;
   /** Parse one `CALL ...` line exactly as a reply would be and run it, returning the RESULT text. For tests and tools built on the agent. */
   runCall(line: string): Promise<string>;
 }
@@ -273,6 +304,19 @@ export function makeAgent(settings: Settings): Agent {
     setServer,
     logout,
     compact,
+    fit,
+    reset: () => {
+      agent.history = [];
+      agent.summary = "";
+      agent.onEvent?.({ type: "reset" });
+    },
+    restore: (history, summary) => {
+      agent.history = history.map((m) => ({ ...m }));
+      agent.summary = summary;
+      agent.onEvent?.({ type: "compacted", summary, history: agent.history });
+    },
+    dialect: undefined,
+    decideDialect: (out) => decideDialect(out),
     account: () => getAccount(settings.serverUrl),
     runCall: async (line) => {
       const call = parseCall(line, [...agent.tools, ...LOCAL_TOOLS].map((t) => t.name));
@@ -280,6 +324,36 @@ export function makeAgent(settings: Settings): Agent {
       return runTool(call);
     },
   };
+
+  // Replies in a row written as a valid call in some other known dialect (ADR-0047's learning from use).
+  let strays: DialectName[] = [];
+
+  /** Ask the model once how it writes tool calls, unless it was asked before (saved per model) or HARNESS_DIALECT says. */
+  async function decideDialect(out: (s: string) => void): Promise<DialectName> {
+    if (settings.toolCalling !== "dynamic") return "call";
+    await pickDialect(out);
+    return agent.dialect!;
+  }
+  async function pickDialect(out: (s: string) => void): Promise<void> {
+    if (agent.dialect) return;
+    const p = activeProfile(settings);
+    const forced = process.env.HARNESS_DIALECT as DialectName | undefined;
+    if (forced && DIALECTS.includes(forced)) {
+      agent.dialect = forced;
+      out(`(tool-call dialect: ${forced}, from HARNESS_DIALECT)`);
+      return;
+    }
+    const saved = savedDialect(p.model);
+    if (saved) {
+      agent.dialect = saved;
+      return;
+    }
+    out("(first run with this model: asking how it writes tool calls...)");
+    const { dialect, how } = await calibrate(p, out);
+    agent.dialect = dialect;
+    saveDialect(p.model, dialect, how);
+    out(`(tool-call dialect: ${dialect}; ${how})`);
+  }
 
   function loadToken(): void {
     mcp.serverUrl = settings.serverUrl;
@@ -302,8 +376,7 @@ export function makeAgent(settings: Settings): Agent {
       loadToken();
       throw err;
     }
-    agent.history = [];
-    agent.summary = "";
+    agent.reset();
   }
 
   function logout(): void {
@@ -320,7 +393,7 @@ export function makeAgent(settings: Settings): Agent {
         : `\nBefore each action, think it through briefly inside <think></think>${settings.thinking === "high" ? ", carefully and in detail" : ""}.`;
     return [
       readFileSync(PERSONALITY_FILE, "utf8").trim(),
-      `## Tools\n${PROTOCOL}${think}\n\n${tools}\n(* = required)`,
+      `## Tools\n${agent.dialect && agent.dialect !== "call" ? TEXT_DIALECTS[agent.dialect].protocol : PROTOCOL}${think}\n\n${tools}\n(* = required)`,
       `## You\n${acct?.handle ? `You are logged in as @${acct.handle}. Your login is saved automatically: never ask for it or type it.` : "You have no account yet. Use register (invent your own handle, display_name and bio) before anything else."}`,
       ...(agent.summary ? [`## Earlier in this conversation\nYour older messages were cut to save space. This is a summary of them:\n${agent.summary}\n\nYou were in the middle of your work. Carry on with "Doing Right Now", then "Next Steps", and keep going with your standing task: do not stop or wait to be asked.`] : []),
       `## People you have dealt with\nYour notes on other agents, updated each time your memory is cut (use read_person handle=... for the full note):\n${peopleForPrompt()}`,
@@ -329,6 +402,15 @@ export function makeAgent(settings: Settings): Agent {
   }
 
   const size = (): number => agent.history.reduce((n, m) => n + approxTokens(m.content), 0);
+  /** Append to the history and to the transcript. */
+  const push = (m: Msg): Msg => {
+    agent.history.push(m);
+    agent.onEvent?.({ type: "msg", role: m.role, content: m.content });
+    return m;
+  };
+  /** Every model call gets the answer allowance from settings (ADR-0055) and, during a turn, its abort signal. */
+  let signal: AbortSignal | undefined;
+  const opts = (): ChatOptions => ({ maxTokens: settings.maxTokens, signal });
 
   /** Summarize the messages before the cut point into agent.summary and drop them (Pi-style, ADR-0025). */
   async function compact(out: (s: string) => void, instructions?: string, keepRecent = compactionSettings(settings).keepRecentTokens): Promise<boolean> {
@@ -340,29 +422,36 @@ export function makeAgent(settings: Settings): Agent {
     const before = approxTokens(system()) + size();
     let text: string;
     try {
-      text = await summarize(profile ?? activeProfile(settings), agent.history.slice(0, cut.index), agent.summary, instructions);
+      text = await summarize(profile ?? activeProfile(settings), agent.history.slice(0, cut.index), agent.summary, instructions, opts());
     } catch (err) {
+      if (err instanceof Aborted) throw err;
       out(`! could not summarize (${(err as Error).message})`);
       return false;
     }
     agent.summary = text;
     // The address book is updated from the same messages, but never at the cost of the compaction itself.
     try {
-      const names = await updatePeople(profile ?? activeProfile(settings), agent.history.slice(0, cut.index), getAccount(settings.serverUrl)?.handle);
+      const names = await updatePeople(profile ?? activeProfile(settings), agent.history.slice(0, cut.index), getAccount(settings.serverUrl)?.handle, opts());
       if (names.length) out(`(updated notes on ${names.map((n) => "@" + n).join(", ")})`);
     } catch (err) {
+      if (err instanceof Aborted) throw err;
       out(`! could not update notes on people (${(err as Error).message})`);
     }
     agent.history = [...(cut.split ? [{ role: "user" as const, content: CONTINUE }] : []), ...agent.history.slice(cut.index)];
+    agent.onEvent?.({ type: "compacted", summary: agent.summary, history: agent.history });
     out(`(compacted: ~${before} → ~${approxTokens(system()) + size()} tokens)`);
     return true;
   }
 
-  /** Keep the conversation inside the context window: compact when it nears the limit; if that is off or fails, shrink old results, then drop old turns. */
+  /**
+   * Keep the conversation inside the context window: compact when it nears the limit; if that is off or fails, shrink
+   * old results, then drop old turns. The window is the server's real one when it could be asked (ADR-0055).
+   */
   async function fit(out: (s: string) => void): Promise<void> {
     const c = compactionSettings(settings);
-    if (c.enabled && approxTokens(system()) + size() > settings.contextTokens - c.reserveTokens) await compact(out);
-    const budget = settings.contextTokens - approxTokens(system()) - 1500;
+    const window = windowOf(settings);
+    if (c.enabled && approxTokens(system()) + size() > window - c.reserveTokens) await compact(out);
+    const budget = window - approxTokens(system()) - Math.max(1500, c.reserveTokens);
     for (let i = 0; i < agent.history.length - 4 && size() > budget; i++) {
       const m = agent.history[i];
       if (m.content.startsWith("RESULT") && m.content.length > 200) m.content = m.content.slice(0, 120) + " ...(old result trimmed)";
@@ -438,7 +527,19 @@ export function makeAgent(settings: Settings): Agent {
       }
       if (seenAny) first = false;
       if (Date.now() + pollMs > deadline) return lastError && !seenAny ? `ERROR: could not check the service while waiting (${lastError}).` : `Nothing new after ${Math.max(1, Math.round((deadline - now) / 60_000))} minute(s).`;
-      await new Promise((r) => setTimeout(r, pollMs));
+      // Ctrl-C ends a wait at once, not at the next poll.
+      const s = signal;
+      if (s?.aborted) throw new Aborted();
+      await new Promise<void>((r) => {
+        const t = setTimeout(done, pollMs);
+        function done(): void {
+          clearTimeout(t);
+          s?.removeEventListener("abort", done);
+          r();
+        }
+        s?.addEventListener("abort", done, { once: true });
+      });
+      if (s?.aborted) throw new Aborted();
     }
   }
 
@@ -447,7 +548,7 @@ export function makeAgent(settings: Settings): Agent {
     const tool = local ?? agent.tools.find((t) => t.name === call.name);
     if (!tool) return `ERROR: there is no tool called "${call.name}". Tools: ${[...agent.tools, ...LOCAL_TOOLS].map((t) => t.name).join(", ")}.`;
     const checked = checkArgs(tool, call);
-    if ("error" in checked) return `ERROR: ${checked.error}\nUsage: CALL ${toolLine(tool)}`;
+    if ("error" in checked) return `ERROR: ${checked.error}\nUsage: ${agent.dialect && agent.dialect !== "call" ? "" : "CALL "}${toolLine(tool)}${agent.dialect && agent.dialect !== "call" ? `\nExample: ${exampleCall(tool, agent.dialect)}` : ""}`;
     const args = checked.args;
     if (local) {
       const s = (k: string): string => String(args[k] ?? "");
@@ -506,26 +607,41 @@ export function makeAgent(settings: Settings): Agent {
     // Only a turn that touched a conversation is worth a note: a swipe-only turn would write one on every profile it glanced at.
     if (!turn.some((m) => m.role === "assistant" && /(?:send_message|get_conversation|end_conversation)/.test(m.content))) return;
     try {
-      const names = await updatePeople(activeProfile(settings), turn, getAccount(settings.serverUrl)?.handle);
+      const names = await updatePeople(activeProfile(settings), turn, getAccount(settings.serverUrl)?.handle, opts());
         out(names.length ? `(updated notes on ${names.map((n) => "@" + n).join(", ")})` : "(no notes written: no one in this turn, or the model's reply had no usable note)");
     } catch (err) {
       out(`! could not update notes on people (${(err as Error).message})`);
     }
   }
 
-  async function say(text: string, out: (s: string) => void, live?: Live): Promise<void> {
+  async function say(text: string, out: (s: string) => void, live?: Live, abort?: AbortSignal): Promise<void> {
     const turn: Msg[] = [];
+    signal = abort;
     try {
       await run(text, out, live, turn);
-    } finally {
       await noteTurn(turn, out);
+    } catch (err) {
+      if (!(err instanceof Aborted)) {
+        await noteTurn(turn, out);
+        throw err;
+      }
+      // Close the history off so it still alternates, and so the model knows the turn was cut short.
+      live?.end();
+      const last = agent.history[agent.history.length - 1];
+      if (last?.role === "assistant") push({ role: "user", content: "RESULT ERROR: interrupted by the user before this finished." });
+      push({ role: "assistant", content: "(stopped: the user interrupted this turn)" });
+      out("(interrupted)");
+    } finally {
+      signal = undefined;
     }
   }
 
   async function run(text: string, out: (s: string) => void, live: Live | undefined, turn: Msg[]): Promise<void> {
     if (!agent.tools.length) await refreshTools();
-    agent.history.push({ role: "user", content: text });
+    await decideDialect(out);
+    push({ role: "user", content: text });
     for (let step = 0; step < settings.maxSteps; step++) {
+      if (signal?.aborted) throw new Aborted();
       await fit(out);
       // Stop generating where the model invents a RESULT, or once its first call is complete: the rest would be
       // made up, and a model that repeats itself would otherwise run to the token limit.
@@ -538,7 +654,7 @@ export function makeAgent(settings: Settings): Agent {
         }
         shown += s;
         const result = shown.search(/\n\s*RESULT\b/);
-        const done = callEnd(shown);
+        const done = agent.dialect && agent.dialect !== "call" ? TEXT_DIALECTS[agent.dialect].end(shown) : callEnd(shown);
         const cut = Math.min(result < 0 ? Infinity : result, done < 0 ? Infinity : done);
         if (cut === Infinity) {
           live?.token("text", s);
@@ -548,32 +664,64 @@ export function makeAgent(settings: Settings): Agent {
         if (before > 0) live?.token("text", s.slice(0, before));
         return true;
       };
-      const got = await chat(activeProfile(settings), system(), agent.history, settings.thinking, sink);
+      let got;
+      try {
+        got = await chat(activeProfile(settings), system(), agent.history, settings.thinking, sink, { ...opts(), tools: agent.dialect === "native" ? nativeTools([...agent.tools, ...LOCAL_TOOLS]) : undefined });
+      } catch (err) {
+        // dynamic/native only: the model server could not parse the tool call the model just made (llama.cpp answers 500,
+        // or a stream error when output breaks its tool format). That is a broken call, not a broken harness.
+        if (agent.dialect !== "native" || !/tool call|tool_call|does not match the expected .*format/i.test((err as Error).message)) throw err;
+        live?.end();
+        out(`! the model's tool call was broken (${(err as Error).message.slice(0, 120)})`);
+        agent.history.push({ role: "assistant", content: "(a tool call whose arguments were not valid JSON)" });
+        agent.history.push({ role: "user", content: "RESULT ERROR: not run: your tool call was cut off or its arguments were not valid JSON. Make the call again, short and complete." });
+        turn.push(...agent.history.slice(-2));
+        continue;
+      }
       live?.end();
       const reasoning = got.reasoning;
       let reply = got.text.replace(/\n\s*RESULT\b[\s\S]*$/, "").trim();
       if (process.env.HARNESS_DEBUG) console.error(`--- model said:\n${reply}\n---`);
       const visible = reply.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
       // Only the visible answer is read: a call written inside the model's thinking does not run.
-      const call = parseCall(visible, toolNames);
+      let call = parseIn(agent.dialect, visible, toolNames);
+      // Learning from use: replies that keep coming out as valid calls in another known dialect switch the agent to it.
+      const stray = (!call || isCallError(call)) && agent.dialect ? otherDialect(agent.dialect, visible, toolNames) : undefined;
+      strays = stray && (!strays.length || strays[0] === stray) ? [...strays, stray] : [];
+      if (stray && strays.length >= SWITCH_AFTER) {
+        out(`(switching tool-call dialect ${agent.dialect} -> ${stray}: the last ${strays.length} replies were ${stray} calls)`);
+        agent.dialect = stray;
+        saveDialect(activeProfile(settings).model, stray, `switched in use after ${strays.length} ${stray} replies`);
+        strays = [];
+        call = parseIn(agent.dialect, visible, toolNames);
+      }
       // Keep only up to the first call in history: models imitate what they said before, and a reply that
       // planned five calls and invented their results teaches them to do it again.
       const found = call && !isCallError(call) ? call : undefined;
       const at = found ? reply.indexOf(found.line) : -1;
       const kept = found && at >= 0 ? reply.slice(0, at + found.line.length) : reply;
-      agent.history.push({ role: "assistant", content: kept || "(no reply)" });
-      turn.push(agent.history[agent.history.length - 1]);
+      turn.push(push({ role: "assistant", content: kept || "(no reply)" }));
       if (!call) {
-        if (!live) out(visible || "(no reply)");
-        else if (!visible) out(reasoning ? "(no answer: it used up its token budget thinking; raise maxTokens in settings.json)" : "(no reply)");
+        // A reasoning model can spend the whole allowance thinking and never answer (ADR-0055): say which setting fixes it.
+        const thought = !!reasoning || /<think>/.test(reply);
+        const short = got.truncated || thought;
+        const limit = activeProfile(settings).maxTokens ?? settings.maxTokens ?? DEFAULT_MAX_TOKENS;
+        const hint = got.truncated
+          ? `(no answer: the reply hit its token limit${thought ? " while the model was still thinking" : ""}. Raise "maxTokens" in settings.json (now ${limit}), or lower /thinking.)`
+          : "(no answer: the model finished thinking without writing a reply; the token limit was not reached)";
+        if (!live) out(visible || (short ? hint : "(no reply)"));
+        else if (!visible) out(short ? hint : "(no reply)");
+        else if (got.truncated) out(`(the reply was cut off at its token limit; raise "maxTokens" in settings.json for longer replies)`);
         return;
       }
       let result: string;
       if (isCallError(call)) {
         const tool = [...agent.tools, ...LOCAL_TOOLS].find((t) => t.name === call.name);
         // Show what to write, not only what was wrong: a model told "wrong" with no example repeats itself.
-        const example = tool ? exampleCall(tool) : "CALL swipe handle=bob direction=like";
-        result = `ERROR: not run: ${call.error}.\nYour last reply was NOT understood and nothing happened. Write exactly this kind of line, starting with the word CALL:\n${example}${tool ? `\nUsage: CALL ${toolLine(tool)}` : ""}`;
+        const swipe = { name: "swipe", description: "", inputSchema: { properties: { handle: { type: "string" }, direction: { type: "string", enum: ["like", "pass"] } }, required: ["handle", "direction"] } };
+        const example = exampleCall(tool ?? swipe, agent.dialect);
+        const own = agent.dialect && agent.dialect !== "call";
+        result = `ERROR: not run: ${call.error}.\nYour last reply was NOT understood and nothing happened. ${own ? "Write your call exactly like this:" : "Write exactly this kind of line, starting with the word CALL:"}\n${example}${tool ? `\nUsage: ${own ? "" : "CALL "}${toolLine(tool)}` : ""}`;
         out(`! ${call.error}`);
       } else {
         if (!live) out(`> ${call.name} ${Object.entries(call.args).map(([k, v]) => `${k}=${v.length > 40 ? v.slice(0, 40) + "…" : v}`).join(" ")}`);
@@ -584,10 +732,10 @@ export function makeAgent(settings: Settings): Agent {
           result = `ERROR: ${err.message}`;
         }
         out(`  ${result.split("\n").pop()!.slice(0, 200)}`);
-        if (visible.split("\n").filter((l) => /^\s*CALL\b/.test(l)).length > 1) result += "\n(Only your first CALL ran. Do one CALL at a time and wait for RESULT.)";
+        if ((!agent.dialect || agent.dialect === "call") && visible.split("\n").filter((l) => /^\s*CALL\b/.test(l)).length > 1) result += "\n(Only your first CALL ran. Do one CALL at a time and wait for RESULT.)";
       }
-      agent.history.push({ role: "user", content: `RESULT ${result}` });
-      turn.push(agent.history[agent.history.length - 1]);
+      if (signal?.aborted) throw new Aborted();
+      turn.push(push({ role: "user", content: `RESULT ${result}` }));
     }
     out(`(stopped after ${settings.maxSteps} steps; say "continue" to go on)`);
   }

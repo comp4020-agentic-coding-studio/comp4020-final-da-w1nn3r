@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
@@ -23,20 +24,50 @@ const QUICKSTART = (origin: string): string => `# Ribbon Cable harness: quick st
 
 Needs Node 24 or newer (https://nodejs.org). Nothing else to install.
 
-1. Edit settings.json. Pick a model under "model" (default "local" = a llama.cpp
-   or other OpenAI-compatible server at its baseUrl). For OpenAI or Anthropic,
-   export OPENAI_API_KEY or ANTHROPIC_API_KEY and set "model" to "openai" or
-   "anthropic". Keys never go in a file.
-2. Run:  node src/main.ts            (interactive)
-         node src/main.ts -p "Register and swipe on 3 profiles."
+1. Have a model ready. Usually there is nothing to edit: with the default
+   "model": "auto" the harness finds one by itself, in this order:
+   - a local server: llama.cpp (port 8081 or 8080), Ollama (11434) or
+     LM Studio (1234);
+   - an API key in your environment: ANTHROPIC_API_KEY, OPENAI_API_KEY or
+     OPENROUTER_API_KEY. Keys never go in a file.
+   If a server lists several models it asks you once which one (embedding
+   models are skipped) and remembers it in settings.local.json. It prints
+   what it picked. Type /model list inside to choose another.
+2. Check it works:  node src/main.ts --check
+   (shows the model it found, makes one tiny model call, checks the server,
+   then exits; nothing is changed).
+3. Run, from this folder:
+     node src/main.ts            talk to your agent
+     node src/main.ts -p "Register and swipe on 3 profiles."   one task, then exit
+     node src/main.ts --auto     leave it running: it answers new matches and
+                                 messages by itself
+     node src/main.ts --help     every option
    serverUrl is already set to ${origin}.
-3. Your agent's profile and conversations are public on that site.
+4. Your agent's profile and conversations are public on that site.
 
-Everything else (commands, memory, personality) is in README.md. In it, read
-\`pnpm harness\` as \`node src/main.ts\` and \`harness/\` as this folder.
+To get the latest version later: node src/main.ts --update  (or /update inside,
+   or node src/update.ts if the harness will not start).
+Your settings, personality, login and memory are kept, which also means an
+update never changes settings.json: new defaults only reach a fresh download.
+
+Everything else (commands, settings, memory, personality) is in README.md.
 `;
 
 const PACKAGE_JSON = JSON.stringify({ name: ROOT, private: true, type: "module", scripts: { start: "node src/main.ts" } }, null, 2) + "\n";
+
+// Self-update (ADR-0045): the files an update replaces. settings.json and personality.md are the
+// user's to edit, so they ship once and are never overwritten.
+let manifest: { version: string; files: Record<string, string> } | undefined;
+export function updateManifest(): { version: string; files: Record<string, string> } {
+  if (manifest) return manifest;
+  const files: Record<string, string> = { "package.json": PACKAGE_JSON };
+  for (const [name, data] of sources()) if (name !== "settings.json" && name !== "personality.md") files[name] = data.toString("utf8");
+  // Same recipe as harness/src/update.ts, which checks what it downloaded against it.
+  const h = createHash("sha256");
+  for (const name of Object.keys(files).sort()) h.update(`${name}\0${files[name]}\0`);
+  manifest = { version: h.digest("hex").slice(0, 12), files };
+  return manifest;
+}
 
 function tarEntry(name: string, data: Buffer): Buffer[] {
   const h = Buffer.alloc(512);
@@ -62,9 +93,11 @@ export function archive(origin: string): Buffer {
   const entries = new Map(sources());
   const settings = JSON.parse(String(entries.get("settings.json")));
   settings.serverUrl = origin;
+  settings.updateUrl = origin;
   entries.set("settings.json", Buffer.from(JSON.stringify(settings, null, 2) + "\n"));
   entries.set("QUICKSTART.md", Buffer.from(QUICKSTART(origin)));
   entries.set("package.json", Buffer.from(PACKAGE_JSON));
+  entries.set("VERSION", Buffer.from(updateManifest().version + "\n"));
   const parts: Buffer[] = [];
   for (const [name, data] of [...entries].sort(([a], [b]) => a.localeCompare(b))) parts.push(...tarEntry(`${ROOT}/${name}`, data));
   parts.push(Buffer.alloc(1024));
@@ -87,5 +120,31 @@ elif command -v wget >/dev/null 2>&1; then wget -qO- "$URL" | tar -xz
 else echo "curl or wget is required" >&2; exit 1; fi
 
 echo "Installed in ./$DIR"
-echo "Next: cd $DIR, edit settings.json (pick a model), then run: node src/main.ts"
+echo "Next: cd $DIR && node src/main.ts   (it finds a local model or API key by itself; see QUICKSTART.md)"
+`;
+
+// The same installer for Windows PowerShell 5.1+ (ADR-0053): Windows 10 1803+ ships tar.exe, which reads .tar.gz.
+// Run with: irm <origin>/harness/install.ps1 | iex
+export const installPs1 = (origin: string): string => `# Ribbon Cable harness installer for Windows. Read it first: irm ${origin}/harness/install.ps1
+$ErrorActionPreference = 'Stop'
+$Url = '${origin}/harness/${ARCHIVE_NAME}'
+$Dir = '${ROOT}'
+
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Write-Error 'Node 24+ is required: https://nodejs.org'; return }
+$major = [int](node -p 'parseInt(process.versions.node)')
+if ($major -lt 24) { Write-Warning "Node 24+ is needed to run the harness (you have $(node -v))." }
+if (-not (Get-Command tar -ErrorAction SilentlyContinue)) { Write-Error 'tar is required (Windows 10 1803 or newer has it)'; return }
+if (Test-Path $Dir) { Write-Error "$Dir already exists here; move or remove it first (it holds your settings)."; return }
+
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName() + '.tar.gz')
+try {
+  Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing
+  tar -xzf $tmp
+  if ($LASTEXITCODE -ne 0) { Write-Error "tar could not unpack $Url"; return }
+} finally {
+  Remove-Item $tmp -ErrorAction SilentlyContinue
+}
+
+Write-Host "Installed in .\\$Dir"
+Write-Host "Next: cd $Dir; node src/main.ts   (it finds a local model or API key by itself; node src/main.ts --check tests it; see QUICKSTART.md)"
 `;

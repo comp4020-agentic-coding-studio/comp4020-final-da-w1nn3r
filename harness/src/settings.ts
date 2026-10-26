@@ -5,10 +5,14 @@ import { fileURLToPath } from "node:url";
 export type Thinking = "off" | "low" | "medium" | "high";
 export const THINKING: Thinking[] = ["off", "low", "medium", "high"];
 
+export type ToolCalling = "strict" | "dynamic";
+export const TOOL_CALLING: ToolCalling[] = ["strict", "dynamic"];
+
 export interface ModelProfile {
   /** "openai" = any OpenAI-compatible /chat/completions (llama.cpp, OpenAI, OpenRouter...); "anthropic" = Claude. */
   type: "openai" | "anthropic";
   baseUrl?: string;
+  /** Model id. A local profile may leave it out: the harness asks the server's /v1/models (ADR-0053). */
   model: string;
   /** What to tell the service you are running on (register's `model`). Defaults to `model`. */
   label?: string;
@@ -28,10 +32,21 @@ export interface ModelProfile {
 
 export interface Settings {
   serverUrl: string;
+  /** Where /update fetches new versions of the harness (ADR-0045). Default: the Fly deployment. */
+  updateUrl?: string;
   model: string;
   thinking: Thinking;
+  /** "strict" (default): every model writes `CALL name key=value` (ADR-0042). "dynamic" (experimental, ADR-0047): ask the model once how it writes tool calls and meet it there. */
+  toolCalling?: ToolCalling;
   maxSteps: number;
-  contextTokens: number;
+  /** The model's context window in tokens, or "auto" (the default): ask the model server (ADR-0055). A number is a cap: the smaller of it and the server's is used. */
+  contextTokens: number | "auto";
+  /** Room for the model's answer, reasoning included, per call (default 4096). The thinking budget is added on top; a profile's own maxTokens wins (ADR-0055). */
+  maxTokens?: number;
+  /** Keep a transcript of each session in data/sessions/ so --resume can carry on (ADR-0056). Default on. */
+  transcript?: boolean;
+  /** auto mode: minutes between looks for new profiles to swipe on while idle; 0 turns it off (ADR-0057). Default 10. */
+  autoBrowseMinutes?: number;
   /** Auto-compaction (ADR-0025). Every field is optional. */
   compaction?: {
     enabled?: boolean;
@@ -44,6 +59,8 @@ export interface Settings {
   };
   /** Write notes on the people a turn dealt with when it ends, not only at compaction (ADR-0039). Default on. */
   notesEachTurn?: boolean;
+  /** The model picked when a server listed several (ADR-0053), keyed by "auto" or a profile name. Written to settings.local.json. */
+  chosenModels?: Record<string, string>;
   /** auto mode: seconds between checks for unanswered messages and new matches */
   autoSeconds?: number;
   models: Record<string, ModelProfile>;
@@ -72,6 +89,7 @@ export function loadSettings(): Settings {
   const s = { ...base, ...local, models: { ...base.models, ...local.models } } as Settings;
   if (process.env.HARNESS_SERVER_URL) s.serverUrl = process.env.HARNESS_SERVER_URL;
   if (process.env.HARNESS_MODEL) s.model = process.env.HARNESS_MODEL;
+  if (process.env.HARNESS_TOOL_CALLING) s.toolCalling = process.env.HARNESS_TOOL_CALLING as ToolCalling;
   s.serverUrl = s.serverUrl.replace(/\/+$/, "");
   return s;
 }

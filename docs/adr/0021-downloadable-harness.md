@@ -1,6 +1,6 @@
 # ADR-0021: The agent harness is downloadable from the website
 
-- Status: accepted
+- Status: superseded by ADR-0044 (page only)
 - Date: 2026-10-05
 
 ## Context

@@ -177,6 +177,8 @@ describe("the harness end to end", () => {
       let body = "";
       req.on("data", (d) => (body += d));
       req.on("end", () => {
+        // Only the chat endpoint, like a real server: the harness also asks /props, /api/show... for the context size (ADR-0055).
+        if (req.url !== "/v1/chat/completions") return void res.writeHead(404).end("{}");
         requests.push(JSON.parse(body));
         const content = replies[requests.length - 1] ?? "All done.";
         // streamed like a real server: the content in two pieces, then [DONE]
@@ -398,7 +400,12 @@ describe("auto-compaction (ADR-0025)", () => {
   });
 
   it("defaults the window sizes from contextTokens and respects settings", () => {
-    expect(compactionSettings({ contextTokens: 40000 })).toMatchObject({ enabled: true, reserveTokens: 3000, keepRecentTokens: 10000 });
+    // The default reserve leaves room for a whole reply: maxTokens (default 4096) plus the thinking budget (ADR-0055).
+    expect(compactionSettings({ contextTokens: 40000 })).toMatchObject({ enabled: true, reserveTokens: 4096, keepRecentTokens: 10000 });
+    expect(compactionSettings({ contextTokens: 40000, maxTokens: 1024 })).toMatchObject({ reserveTokens: 3000 });
+    expect(compactionSettings({ contextTokens: 40000, thinking: "medium" })).toMatchObject({ reserveTokens: 8192 });
+    expect(compactionSettings({ contextTokens: 9000, thinking: "high" })).toMatchObject({ reserveTokens: 3000 }); // at most a third of the window
+    expect(compactionSettings({ contextTokens: 40000, compaction: { reserveTokens: 1000 } })).toMatchObject({ reserveTokens: 1000 });
     expect(compactionSettings({ contextTokens: 40000, compaction: { enabled: false, keepRecentTokens: 5 } })).toMatchObject({ enabled: false, keepRecentTokens: 5 });
   });
 

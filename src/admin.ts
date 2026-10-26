@@ -47,7 +47,7 @@ const credentialsMatch = (user: string, password: string): boolean =>
   // both are always compared, so a wrong username takes as long as a wrong password
   [timingSafeEqual(sha(user), sha(config.adminUser)), timingSafeEqual(sha(password), sha(config.adminPassword))].every(Boolean);
 
-// --- session: a signed, expiring cookie, so nothing is kept on the server (the machine stops when idle) ---
+// --- session: a signed, expiring cookie, so a machine stop does not log the admin out; logout revokes it (ADR-0046) ---
 const COOKIE = "admin_session";
 const SESSION_MS = 8 * 3_600_000;
 const sessionKey = (): string => createHash("sha256").update(`${config.adminUser}\n${config.adminPassword}\nadmin-session`).digest("hex");
@@ -60,11 +60,23 @@ function sessionCookie(req: IncomingMessage): string {
 }
 const clearCookie = (): string => `${COOKIE}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0`;
 
-function hasSession(req: IncomingMessage): boolean {
+/** The session cookie's expiry and signature when it is genuine and unexpired, else null. */
+function session(req: IncomingMessage): { exp: string; sig: string } | null {
   const raw = String(req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) ?? "";
   const [exp, sig] = raw.split(".");
-  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
-  return timingSafeEqual(sha(sig), sha(sign(exp)));
+  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return null;
+  return timingSafeEqual(sha(sig), sha(sign(exp))) ? { exp, sig } : null;
+}
+// Logout revokes the cookie on the server (ADR-0046): its signature is kept, hashed, until it would expire.
+const sigHash = (sig: string): string => sha(`admin-revoked\n${sig}`).toString("hex");
+const hasSession = (req: IncomingMessage): boolean => {
+  const s = session(req);
+  return s !== null && !one("SELECT 1 AS x FROM admin_revoked WHERE sig_hash = ?", sigHash(s.sig));
+};
+function revokeSession(req: IncomingMessage): void {
+  const s = session(req);
+  db.prepare("DELETE FROM admin_revoked WHERE expires_at < ?").run(Date.now());
+  if (s) db.prepare("INSERT OR IGNORE INTO admin_revoked (sig_hash, expires_at) VALUES (?, ?)").run(sigHash(s.sig), Number(s.exp));
 }
 
 /** Basic credentials in the Authorization header, for scripts (the specs, scripts/load.ts). */
@@ -327,6 +339,14 @@ function logsPage(): string {
 
 const redirect = (to: string): AdminResponse => ({ status: 303, body: "", headers: { location: to } });
 const html = (status: number, body: string): AdminResponse => ({ status, body });
+/** decodeURIComponent that answers null for a malformed %-escape, which no handle can match. */
+const decode = (s: string): string | null => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return null;
+  }
+};
 const flashUrl = (path: string, msg: string): string => `${path}${path.includes("?") ? "&" : "?"}flash=${encodeURIComponent(msg)}`;
 
 /** Handles every request under /admin. Returns null when the feature is disabled so the caller can 404. */
@@ -397,7 +417,10 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
         headers: { "content-disposition": `attachment; filename="${file.name}"`, ...(file.truncated ? { "x-log-truncated": "true" } : {}) },
       });
     }
-    if ((m = path.match(/^\/admin\/agents\/([^/]+)$/))) return finish(agentView(decodeURIComponent(m[1]), flash));
+    if ((m = path.match(/^\/admin\/agents\/([^/]+)$/))) {
+      const handle = decode(m[1]);
+      return finish(handle === null ? null : agentView(handle, flash));
+    }
     return finish(null);
   }
   if (method !== "POST") return finish({ status: 405, body: "Method not allowed.", type: "text/plain", headers: { allow: "GET, HEAD, POST" } });
@@ -413,7 +436,11 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
   const given = sha(form.get("csrf") ?? "");
   if (!timingSafeEqual(given, sha(csrfToken()))) return finish({ status: 403, body: "Missing or bad CSRF token. Reload the page and try again.", type: "text/plain" });
 
-  if (path === "/admin/logout") return finish({ status: 303, body: "", headers: { location: "/admin/login", "set-cookie": clearCookie() } });
+  if (path === "/admin/logout") {
+    revokeSession(req);
+    log("admin", { action: "logout", ip });
+    return finish({ status: 303, body: "", headers: { location: "/admin/login", "set-cookie": clearCookie() } });
+  }
 
   if (path === "/admin/agents/bulk-delete") {
     const handles = [...new Set(form.getAll("handle").map((h) => h.trim()).filter(Boolean))].slice(0, 200);
@@ -425,7 +452,8 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
   }
 
   if ((m = path.match(/^\/admin\/agents\/([^/]+)\/(delete|reset-token|scrub)$/))) {
-    const handle = decodeURIComponent(m[1]);
+    const handle = decode(m[1]);
+    if (handle === null) return finish(null);
     const back = agentHref(handle);
     if (m[2] === "delete") {
       if (form.get("confirm") !== handle) return finish(redirect(flashUrl(back, "Handle did not match; nothing deleted.")));

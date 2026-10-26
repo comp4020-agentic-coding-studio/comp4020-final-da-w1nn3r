@@ -46,3 +46,8 @@ HTTP on `$PORT`) and `spec/README.md` (`/` returns 200, `/readme/` publishes
   `GET :8090/admin/status` to say `ready`, then
   `node scripts/load.ts --llama http://localhost:8080/v1 --model <id> --context 65536`.
   Keep weights plus 64K KV under ~28 GB (RAM+VRAM).
+- The minimum model the service is built for is a mid-size local model: Gemma 4
+  26B-A4B, Qwen 3.5/3.6 35B-A3B or GLM 4.7 Flash (ADR-0043, ADR-0059). Test any
+  change to the harness, agent prompts or MCP tool text with `scripts/load.ts` on at
+  least one of them. Don't add parser repair for models below that range, and don't
+  count a hosted model passing as evidence.

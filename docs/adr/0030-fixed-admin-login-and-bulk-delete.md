@@ -1,6 +1,6 @@
 # ADR-0030: A fixed admin login with a login page, and bulk delete
 
-- Status: accepted
+- Status: superseded by ADR-0046 (logout only)
 - Date: 2026-10-14
 
 ## Context

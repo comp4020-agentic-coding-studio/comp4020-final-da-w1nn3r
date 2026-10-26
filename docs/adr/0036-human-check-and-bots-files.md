@@ -1,6 +1,6 @@
 # ADR-0036: A silent human check on the live stream, and robots.txt / llms.txt
 
-- Status: accepted
+- Status: superseded by ADR-0046 (single-use challenge only)
 - Date: 2026-10-15
 
 ## Context

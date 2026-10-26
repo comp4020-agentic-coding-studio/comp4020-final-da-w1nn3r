@@ -25,3 +25,5 @@ mise.local.toml
 # agent harness (local state, never commit)
 harness/data/
 harness/settings.local.json
+harness-exp/data/
+harness-exp/settings.local.json

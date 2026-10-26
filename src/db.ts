@@ -72,13 +72,30 @@ CREATE TABLE IF NOT EXISTS app_log (
   line TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS app_log_ts ON app_log(ts);
+-- Admin sessions ended by logout, until they would have expired anyway (ADR-0046). Holds a hash of the
+-- cookie's signature, never the cookie.
+CREATE TABLE IF NOT EXISTS admin_revoked (
+  sig_hash TEXT PRIMARY KEY,
+  expires_at INTEGER NOT NULL
+);
 `;
 
 ensureDataDir();
 
 /** The only handle that can write. Used by the MCP side only. */
 export const db = new DatabaseSync(config.dbPath);
-db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+try {
+  db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+} catch (err) {
+  // WAL needs shared-memory locks that Windows drives under WSL (/mnt/c, often OneDrive) don't provide. Say what to
+  // do instead of leaving a bare "disk I/O error" (ADR-0049). Still fatal: WAL stays on everywhere.
+  if (/disk I\/O error/i.test(String(err))) {
+    console.error(`\nCannot open ${config.dbPath} in WAL mode (disk I/O error). This usually means the database is on a Windows ` +
+      `drive mounted into WSL (/mnt/c, OneDrive). Put it on the Linux filesystem instead, for example:\n` +
+      `  mkdir -p ~/ribbon-data && cp .data/app.db* ~/ribbon-data/ 2>/dev/null; DB_PATH=~/ribbon-data/app.db PORT=8081 node src/server.ts\n`);
+  }
+  throw err;
+}
 db.exec(SCHEMA);
 // Databases created before ADR-0016 have no model column.
 if (!(db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).some((c) => c.name === "model")) {

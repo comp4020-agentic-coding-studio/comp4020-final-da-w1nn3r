@@ -19,6 +19,8 @@
 //   --round-minutes N          give up on an agent's round after this long (default 15)
 //   --context N                 the model's context window in tokens, for the harness's compaction (default 40000; Gemma 4 runs at 83840)
 //   --list                      list sessions
+//   --tool-calling strict|dynamic   how agents write tool calls (default strict; dynamic is experimental and calibrates once per session, ADR-0047)
+//   --harness DIR               run the harness in DIR instead of harness/
 // Env equivalents: LLAMA_URL, LLAMA_MODEL, APP_URL, ROUNDS, ROUND_MINUTES, KEEP=1, ADMIN_USER, ADMIN_PASSWORD.
 //
 // Needs nothing installed: the harness and this script use only Node's own modules, so it runs on Windows too.
@@ -74,7 +76,7 @@ const fail = (msg: string): never => {
   console.error(msg);
   process.exit(2);
 };
-const KNOWN = ["round-delay", "provider","budget", "input-price", "output-price", "agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "list", "help"];
+const KNOWN = ["round-delay", "provider","budget", "input-price", "output-price", "agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "harness", "tool-calling", "list", "help"];
 for (const name of flags.keys()) if (!KNOWN.includes(name)) fail(`Unknown option --${name}. Options are listed at the top of scripts/load.ts (or run with --help).`);
 if (flags.has("help")) {
   console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith("//")).map((l) => l.slice(3)).join("\n"));
@@ -168,10 +170,10 @@ const CHAT =
   "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character and honestly: say what you really think, disagree or push back when you do, and bring up something they told you earlier. A match is not a promise: if there is no spark, you want different things, or they only agree with everything you say, say so kindly or close it with end_conversation and a short reason. If you have no open matches, call get_next_profiles with limit=5 and swipe on them, liking only those who genuinely fit you. Reply with a one-line summary.";
 
 /** One non-interactive harness run, output to a file. Resolves with the exit code (or "timeout"). */
-function runHarness(s: Session, i: number, prompt: string, round: number, roundMs: number): Promise<number | "timeout"> {
+function runHarness(s: Session, i: number, prompt: string, round: number, roundMs: number, args = ["-p", prompt], logName = `round-${round}.log`): Promise<number | "timeout"> {
   const dir = instanceDir(s.id, i);
-  const log = createWriteStream(join(dir, `round-${round}.log`));
-  const child = spawn(process.execPath, ["harness/src/main.ts", "-p", prompt], {
+  const log = createWriteStream(join(dir, logName));
+  const child = spawn(process.execPath, [join(flags.get("harness") ?? "harness", "src", "main.ts"), ...args], {
     env: {
       ...process.env,
       HARNESS_HOME: dir,
@@ -179,6 +181,9 @@ function runHarness(s: Session, i: number, prompt: string, round: number, roundM
       HARNESS_RUN_DEADLINE: String(Date.now() + roundMs),
       HARNESS_LOCAL_FILE: join(dir, "settings.local.json"),
       HARNESS_PERSONALITY_FILE: join(dir, "personality.md"),
+      // the experimental harness's tool-call dialect, decided once for the whole session (ADR-0047)
+      HARNESS_DIALECT_FILE: join(SESSIONS, s.id, "dialect.json"),
+      ...(flags.get("tool-calling") ? { HARNESS_TOOL_CALLING: flags.get("tool-calling")! } : {}),
       NO_COLOR: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -320,6 +325,13 @@ const recordJoined = (): void => {
   }
 };
 recordJoined();
+
+// Dynamic tool calling learns how the model writes tool calls; do it once here so every agent shares it (ADR-0047).
+if (flags.get("tool-calling") === "dynamic" && rounds > 0 && !existsSync(join(SESSIONS, session.id, "dialect.json"))) {
+  const code = await runHarness(session, 0, "", 0, 10 * 60_000, ["--calibrate", "--toolcalling", "dynamic"], "calibrate.log");
+  const line = readFileSync(join(instanceDir(session.id, 0), "calibrate.log"), "utf8").match(/^dialect: .*$/m)?.[0];
+  console.log(`tool-call ${line ?? `calibration failed (${code}); each agent will try on its own`}`);
+}
 
 for (let r = 1; r <= rounds; r++) {
   const round = session.roundsDone + 1;
