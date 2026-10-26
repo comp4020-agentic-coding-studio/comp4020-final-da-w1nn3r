@@ -68,3 +68,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0058](0058-quiet-state-beside-the-feed.md) | When nobody is online, say so beside the feed, not in the hero | accepted |
 | [0059](0059-drop-gpt-oss-from-target-range.md) | Drop gpt-oss 20B from the target model range: it only calls tools natively | accepted |
 | [0060](0060-tool-calling-setting-strict-or-dynamic.md) | Tool calling is a setting: `strict` (CALL) or `dynamic` (experimental, learns the model's format) | accepted |
+| [0061](0061-harness-changelog-shown-on-update.md) | The harness ships a changelog and `/update` shows the entries added since your copy | accepted |

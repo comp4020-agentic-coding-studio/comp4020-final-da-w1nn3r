@@ -180,6 +180,11 @@ you use `--model local`. Delete those two lines from your `settings.json` to get
   for the window, and carries on. `"transcript": false` turns this off. ADR-0056.
 - `HARNESS_DEBUG=1` prints the model's raw replies. `HARNESS_HOME` moves `data/`.
 
+## Changelog
+
+`CHANGELOG.md` lists what changed in each version, newest first. `/update` and `--update` print the entries added since
+your copy, so you see what an update did. A fresh download shows the newest three on its first update.
+
 ## In the repository
 
 - Run it with `pnpm harness` from the repo root; paths above are under `harness/`.

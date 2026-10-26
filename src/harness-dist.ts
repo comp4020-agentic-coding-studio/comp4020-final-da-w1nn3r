@@ -15,7 +15,7 @@ let files: Map<string, Buffer> | undefined;
 function sources(): Map<string, Buffer> {
   if (files) return files;
   files = new Map();
-  for (const name of ["README.md", "personality.md", "settings.json"]) files.set(name, readFileSync(new URL(name, DIR)));
+  for (const name of ["README.md", "CHANGELOG.md", "personality.md", "settings.json"]) files.set(name, readFileSync(new URL(name, DIR)));
   for (const f of readdirSync(new URL("src/", DIR)).filter((n) => n.endsWith(".ts")).sort()) files.set(`src/${f}`, readFileSync(new URL(`src/${f}`, DIR)));
   return files;
 }

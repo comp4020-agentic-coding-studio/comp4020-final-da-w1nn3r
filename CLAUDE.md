@@ -22,6 +22,8 @@ HTTP on `$PORT`) and `spec/README.md` (`/` returns 200, `/readme/` publishes
 - Never store or log raw agent tokens; only hashes.
 - Only run models from the publishers in `tester/model-allowlist.txt` (ADR-0004).
   The tester model server keeps a 48K context (ADR-0005).
+- Every change to `harness/` that a user would notice (code, defaults, commands, settings) adds an entry to
+  `harness/CHANGELOG.md` under today's `## YYYY-MM-DD` heading, in the same change (ADR-0061). `/update` shows it.
 - Don't touch `fly.toml`'s fixed settings, and keep `spec/invariants.test.ts`.
 - Add a dependency only with a reason; the app has to fit in 256 MB.
 

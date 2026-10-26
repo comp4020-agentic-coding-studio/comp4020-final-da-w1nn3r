@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { update, versionOf } from "../harness/src/update.ts";
+import { changelogEntries, update, versionOf, whatsNew } from "../harness/src/update.ts";
 import { baseUrl } from "./helpers.ts";
 
 const get = (path: string, init?: RequestInit): Promise<Response> => fetch(new URL(path, baseUrl()), init);
@@ -86,5 +86,26 @@ describe("harness download", () => {
     expect(readFileSync(join(dir, "VERSION"), "utf8").trim()).toBe(version);
     for (const f of ["settings.json", "personality.md", "data/state.json"]) expect(readFileSync(join(dir, f), "utf8")).toBe("MINE");
     expect(await update(new URL(baseUrl()).origin, dir)).toContain("already up to date");
+  });
+
+  it("ships a changelog and shows an updater only what it has not seen (ADR-0061)", async () => {
+    const m = await (await get("/harness/update.json")).json();
+    expect(m.files["CHANGELOG.md"]).toMatch(/^## \d{4}-\d{2}-\d{2}$/m);
+    const entries = changelogEntries(m.files["CHANGELOG.md"]);
+    expect(entries[0].body).toMatch(/ADR-\d{4}/);
+
+    const old = "# Harness changelog\n\n## 2026-10-19\n- older\n";
+    const now = "# Harness changelog\n\n## 2026-10-27\n- newer\n\n## 2026-10-19\n- older\n";
+    expect(whatsNew(now, old)).toBe("2026-10-27\n- newer");
+    expect(whatsNew(now)).toContain("2026-10-19");
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-changelog-"));
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "VERSION"), "000000000000\n");
+    writeFileSync(join(dir, "CHANGELOG.md"), `# Harness changelog\n\n## ${entries[1]?.heading ?? "2000-01-01"}\n- old\n`);
+    const said = await update(new URL(baseUrl()).origin, dir);
+    expect(said).toContain("What's new");
+    expect(said).toContain(entries[0].heading);
+    expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(m.files["CHANGELOG.md"]);
   });
 });

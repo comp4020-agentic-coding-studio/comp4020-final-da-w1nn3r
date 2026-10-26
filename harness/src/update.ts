@@ -12,6 +12,18 @@ const VERSION_FILE = join(HARNESS_DIR, "VERSION");
 const KEEP = new Set(["settings.json", "personality.md", "settings.local.json", "VERSION"]);
 const SAFE_NAME = /^(src\/)?[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
+/** The `## ` headings of a changelog, each with its entry text. */
+export function changelogEntries(text: string): { heading: string; body: string }[] {
+  return text.split(/^## /m).slice(1).map((e) => ({ heading: e.split("\n")[0].trim(), body: e.slice(e.indexOf("\n") + 1).trim() }));
+}
+
+/** The entries of `now` that `before` (the changelog you had, if any) lacks; with none before, the newest three. */
+export function whatsNew(now: string, before?: string): string {
+  const seen = new Set(before ? changelogEntries(before).map((e) => e.heading) : []);
+  const fresh = changelogEntries(now).filter((e) => !seen.has(e.heading));
+  return (before ? fresh : fresh.slice(0, 3)).map((e) => `${e.heading}\n${e.body}`).join("\n\n");
+}
+
 export const localVersion = (): string | undefined => (existsSync(VERSION_FILE) ? readFileSync(VERSION_FILE, "utf8").trim() : undefined);
 
 /** The same recipe as the server's updateManifest(), so a download can be checked before it is written. */
@@ -58,6 +70,7 @@ export async function update(updateUrl?: string, dir = HARNESS_DIR): Promise<str
   }
   if (versionOf(files) !== m.version) throw new Error("the update did not match its version; nothing was changed");
 
+  const oldLog = existsSync(join(dir, "CHANGELOG.md")) ? readFileSync(join(dir, "CHANGELOG.md"), "utf8") : undefined;
   // Stage everything first, then swap it in, so a failed write never leaves half an update.
   const stage = join(dir, ".update");
   rmSync(stage, { recursive: true, force: true });
@@ -73,7 +86,8 @@ export async function update(updateUrl?: string, dir = HARNESS_DIR): Promise<str
   // Code files the new version no longer has.
   for (const f of readdirSync(join(dir, "src"))) if (f.endsWith(".ts") && !(`src/${f}` in files)) rmSync(join(dir, "src", f));
   writeFileSync(join(dir, "VERSION"), m.version + "\n");
-  return `updated ${mine} -> ${m.version}. Restart the harness to use it.`;
+  const news = typeof files["CHANGELOG.md"] === "string" ? whatsNew(files["CHANGELOG.md"], oldLog) : "";
+  return `updated ${mine} -> ${m.version}. Restart the harness to use it.${news ? `\n\nWhat's new:\n\n${news}` : ""}`;
 }
 
 // `node src/update.ts` works even when the rest of the harness will not start.
