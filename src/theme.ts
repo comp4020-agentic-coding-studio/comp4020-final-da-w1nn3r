@@ -5,22 +5,22 @@ export const STYLE = `
 :root{
   --bg:#060810;--bg2:#0b0f1c;--surface:rgba(255,255,255,.045);--surface2:rgba(255,255,255,.08);
   --line:rgba(255,255,255,.1);--fg:#e8ecf4;--muted:#8b94a8;
-  --accent:#6c8cff;--accent2:#22d3ee;--accent3:#a78bfa;--online:#34d399;--glow:rgba(108,140,255,.35);
+  --accent:#9f55d8;--accent2:#de3ac8;--accent3:#c046d0;--online:#34d399;--glow:rgba(159,85,216,.35);
   --font:"Space Grotesk","Segoe UI",system-ui,-apple-system,sans-serif;
   --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --radius:18px;
 }
 @media(prefers-color-scheme:light){:root{
   --bg:#f2f4fb;--bg2:#e9edf7;--surface:rgba(16,24,48,.05);--surface2:rgba(16,24,48,.09);
-  --line:rgba(16,24,48,.12);--fg:#131a2c;--muted:#566079;--glow:rgba(108,140,255,.22);--online:#059669;
+  --line:rgba(16,24,48,.12);--fg:#131a2c;--muted:#566079;--glow:rgba(159,85,216,.22);--online:#059669;
 }}
 *{box-sizing:border-box}
 html{color-scheme:dark light}
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);font:16px/1.6 var(--font);overflow-x:hidden}
 body::before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
-  background:radial-gradient(60rem 30rem at 15% -10%,rgba(108,140,255,.22),transparent 60%),
-             radial-gradient(50rem 28rem at 90% 0%,rgba(167,139,250,.18),transparent 60%),
-             radial-gradient(40rem 30rem at 50% 110%,rgba(34,211,238,.10),transparent 60%)}
+  background:radial-gradient(60rem 30rem at 15% -10%,rgba(159,85,216,.22),transparent 60%),
+             radial-gradient(50rem 28rem at 90% 0%,rgba(192,70,208,.18),transparent 60%),
+             radial-gradient(40rem 30rem at 50% 110%,rgba(222,58,200,.10),transparent 60%)}
 body::after{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
   background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
   background-size:72px 72px;opacity:.45;
@@ -129,7 +129,7 @@ p time,.card time,.muted time{font:inherit}
 .msg{max-width:min(34rem,85%);padding:.65rem 1rem;border-radius:18px 18px 18px 4px;background:var(--surface2);border:1px solid var(--line)}
 .msg b{font:.8rem var(--mono);color:var(--accent2)}
 .msg p{margin:.2rem 0;white-space:pre-wrap;overflow-wrap:anywhere}
-.msg.right{align-self:flex-end;border-radius:18px 18px 4px 18px;background:linear-gradient(135deg,rgba(108,140,255,.28),rgba(167,139,250,.24))}
+.msg.right{align-self:flex-end;border-radius:18px 18px 4px 18px;background:linear-gradient(135deg,rgba(159,85,216,.28),rgba(192,70,208,.24))}
 .msg.right b{color:var(--accent3)}
 .pair{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}
 .heart{color:var(--accent3)}
@@ -192,12 +192,12 @@ export const APP_JS = `
       g.clearRect(0, 0, w, h);
       for (const a of nodes) {
         if (!reduce) { a.x += a.vx; a.y += a.vy; if (a.x < 0 || a.x > w) a.vx *= -1; if (a.y < 0 || a.y > h) a.vy *= -1; }
-        g.fillStyle = "rgba(108,140,255,.8)";
+        g.fillStyle = "rgba(159,85,216,.8)";
         g.beginPath(); g.arc(a.x, a.y, 1.6, 0, 6.3); g.fill();
       }
       for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
         const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y, d = Math.hypot(dx, dy);
-        if (d < 130) { g.strokeStyle = "rgba(34,211,238," + (.35 * (1 - d / 130)) + ")"; g.beginPath(); g.moveTo(nodes[i].x, nodes[i].y); g.lineTo(nodes[j].x, nodes[j].y); g.stroke(); }
+        if (d < 130) { g.strokeStyle = "rgba(222,58,200," + (.35 * (1 - d / 130)) + ")"; g.beginPath(); g.moveTo(nodes[i].x, nodes[i].y); g.lineTo(nodes[j].x, nodes[j].y); g.stroke(); }
       }
       if (!reduce) raf = requestAnimationFrame(draw);
     };

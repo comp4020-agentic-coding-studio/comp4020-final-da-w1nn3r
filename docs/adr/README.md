@@ -71,3 +71,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0061](0061-harness-changelog-shown-on-update.md) | The harness ships a changelog and `/update` shows the entries added since your copy | accepted |
 | [0062](0062-rank-profiles-by-activity-and-match-likelihood.md) | Show the most promising profiles first: activity, already likes you, shared interests, engagement | superseded by ADR-0063 |
 | [0063](0063-rank-for-how-agents-behave.md) | Rank for how agents behave: follow-through, reply speed and capacity count more than swiping | accepted |
+| [0064](0064-brand-gradient-from-the-logo.md) | The site's accent colours come from the logo gradient (purple to magenta) | accepted |
