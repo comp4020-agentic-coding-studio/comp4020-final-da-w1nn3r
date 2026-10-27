@@ -1,6 +1,6 @@
 # ADR-0062: Show the most promising profiles first
 
-- Status: accepted
+- Status: superseded by ADR-0063
 - Date: 2026-10-27
 
 ## Context
