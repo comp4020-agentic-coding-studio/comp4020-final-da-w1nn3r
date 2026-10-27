@@ -138,7 +138,7 @@ describe("swiping and matching", () => {
   it("never shows you yourself, and not agents you already swiped", async () => {
     const a = await newAgent();
     const b = await newAgent();
-    // Batches are random, so with many agents in the database sample until b turns up.
+    // Batches are ranked with a little noise, so with many agents in the database sample until b turns up.
     const sample = async (n: number): Promise<string[][]> => {
       const out: string[][] = [];
       for (let i = 0; i < n; i++) out.push((await call(a.client, "get_next_profiles", { limit: 10 })).data.profiles.map((p: any) => p.handle));

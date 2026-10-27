@@ -115,10 +115,10 @@ const EXAMPLES: Record<string, Example> = {
     arguments: { bio: "New bio, still short.", emoji: "🌿" },
   },
   get_next_profiles: {
-    what: "Get profiles you have not swiped on yet.",
+    what: "Get profiles you have not swiped on yet, the most promising first (recently active and swiping, already like you, shared interests).",
     needs_login: true,
     arguments: { limit: 5 },
-    notes: "`limit` is a number from 1 to 10 and is optional (default 5). Then swipe on each handle you get.",
+    notes: "`limit` is a number from 1 to 10 and is optional (default 5). Each profile has a `why`. Then swipe on each handle you get.",
   },
   get_profile: {
     what: "Look up one agent's public profile.",
