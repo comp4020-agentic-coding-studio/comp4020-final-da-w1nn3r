@@ -10,6 +10,9 @@ const one = (sql: string, ...args: (string | number)[]): Row | undefined => read
 export const ONLINE_WINDOW_MS = 15 * 60_000;
 export const isOnline = (lastSeen: unknown): boolean => lastSeen != null && Date.now() - Number(lastSeen) < ONLINE_WINDOW_MS;
 
+/** What the feed shows of an agent: written by the agent, so always escaped on output. */
+export interface Prof { name: string; emoji: string; color: string; bio: string }
+
 export interface FeedEvent {
   id: number;
   type: string;
@@ -17,6 +20,12 @@ export interface FeedEvent {
   actor: string;
   target?: string;
   matchId?: number;
+  messageId?: number;
+  // Filled in by enrich(): who the agents are, what was said, why a chat ended.
+  actorProfile?: Prof;
+  targetProfile?: Prof;
+  body?: string;
+  reason?: string | null;
 }
 
 const toEvent = (r: Row): FeedEvent => {
@@ -28,14 +37,65 @@ const toEvent = (r: Row): FeedEvent => {
     actor: String(p.actor),
     target: p.target === undefined ? undefined : String(p.target),
     matchId: p.match_id === undefined ? undefined : Number(p.match_id),
+    messageId: p.message_id === undefined ? undefined : Number(p.message_id),
   };
 };
 
+const marks = (n: number): string => Array(n).fill("?").join(",");
+
+/** Adds profiles, message text and end reasons to events with three queries, however many events there are. */
+function enrich(events: FeedEvent[]): FeedEvent[] {
+  if (!events.length) return events;
+  const handles = [...new Set(events.flatMap((e) => (e.target ? [e.actor, e.target] : [e.actor])))];
+  const profiles = new Map<string, Prof>();
+  for (const r of all(`SELECT a.handle, p.display_name, p.emoji, p.color, p.bio FROM agents a JOIN profiles p ON p.agent_id = a.id WHERE a.handle IN (${marks(handles.length)})`, ...handles)) {
+    profiles.set(String(r.handle), { name: String(r.display_name), emoji: String(r.emoji ?? ""), color: String(r.color ?? ""), bio: String(r.bio ?? "") });
+  }
+  const messageIds = events.flatMap((e) => (e.messageId === undefined ? [] : [e.messageId]));
+  const bodies = new Map<number, string>();
+  if (messageIds.length) for (const r of all(`SELECT id, body FROM messages WHERE id IN (${marks(messageIds.length)})`, ...messageIds)) bodies.set(Number(r.id), String(r.body));
+  const endedIds = [...new Set(events.flatMap((e) => (e.type === "ended" && e.matchId !== undefined ? [e.matchId] : [])))];
+  const reasons = new Map<number, string | null>();
+  if (endedIds.length) for (const r of all(`SELECT id, end_reason FROM matches WHERE id IN (${marks(endedIds.length)})`, ...endedIds)) reasons.set(Number(r.id), r.end_reason == null ? null : String(r.end_reason));
+  return events.map((e) => ({
+    ...e,
+    actorProfile: profiles.get(e.actor),
+    targetProfile: e.target ? profiles.get(e.target) : undefined,
+    body: e.messageId === undefined ? undefined : bodies.get(e.messageId),
+    reason: e.type === "ended" && e.matchId !== undefined ? reasons.get(e.matchId) : undefined,
+  }));
+}
+
 export const recentEvents = (limit: number): FeedEvent[] =>
-  all("SELECT * FROM events ORDER BY id DESC LIMIT ?", limit).map(toEvent);
+  enrich(all("SELECT * FROM events ORDER BY id DESC LIMIT ?", limit).map(toEvent));
 
 export const eventsAfter = (id: number, limit = 100): FeedEvent[] =>
-  all("SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?", id, limit).map(toEvent);
+  enrich(all("SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?", id, limit).map(toEvent));
+
+// ---- "Hot right now" on the home page --------------------------------------------------------------
+export const HOT_WINDOW_MS = 30 * 60_000;
+const MATCH_PAIR = "JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b LEFT JOIN profiles pa ON pa.agent_id = a.id LEFT JOIN profiles pb ON pb.agent_id = b.id";
+const PAIR_COLS = "x.id, x.created_at, x.ended_at, a.handle AS a_handle, b.handle AS b_handle, pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color";
+const TOTAL = "(SELECT COUNT(*) FROM messages WHERE match_id = x.id) AS total";
+const LAST = "(SELECT body FROM messages WHERE match_id = x.id ORDER BY id DESC LIMIT 1) AS last_body";
+
+/** The busiest chat of the last half hour, the newest match, and the longest conversation ever. Each may be missing. */
+export function hot(): { chat?: Row; newest?: Row; longest?: Row } {
+  return {
+    chat: one(
+      `SELECT ${PAIR_COLS}, c.n AS recent, ${TOTAL}, ${LAST}
+       FROM (SELECT match_id, COUNT(*) AS n, MAX(id) AS last_id FROM messages WHERE created_at > ? GROUP BY match_id ORDER BY n DESC, last_id DESC LIMIT 1) c
+       JOIN matches x ON x.id = c.match_id ${MATCH_PAIR}`,
+      Date.now() - HOT_WINDOW_MS,
+    ),
+    newest: one(`SELECT ${PAIR_COLS}, ${TOTAL}, ${LAST} FROM matches x ${MATCH_PAIR} ORDER BY x.id DESC LIMIT 1`),
+    longest: one(
+      `SELECT ${PAIR_COLS}, c.n AS total, ${LAST}
+       FROM (SELECT match_id, COUNT(*) AS n FROM messages GROUP BY match_id ORDER BY n DESC, match_id DESC LIMIT 1) c
+       JOIN matches x ON x.id = c.match_id ${MATCH_PAIR}`,
+    ),
+  };
+}
 
 export const latestEventId = (): number => Number(one("SELECT COALESCE(MAX(id), 0) AS n FROM events")?.n);
 
@@ -172,6 +232,7 @@ export function listMatches(f: MatchFilter = parseMatchFilter(new URLSearchParam
   return {
     rows: all(
       `SELECT x.id, x.created_at, x.ended_at, a.handle AS a_handle, b.handle AS b_handle, pa.model AS a_model, pb.model AS b_model,
+         pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color,
          COALESCE(c.n, 0) AS message_count, c.last_at, (SELECT body FROM messages WHERE id = c.last_id) AS last_body
        ${from} ORDER BY ${MATCH_ORDER[f.sort]} LIMIT 100`,
       ...args,

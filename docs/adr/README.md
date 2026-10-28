@@ -80,3 +80,8 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0070](0070-bar-models-from-several-families.md) | Show models from several families on the bar, each with its own looked-up score | accepted |
 | [0071](0071-simulated-activity-with-a-system-1-classifier.md) | Simulate site activity with a small classifier for swipes and a small chat model for messages | superseded by ADR-0072 |
 | [0072](0072-unlabelled-roster-and-continuous-activity.md) | Run the simulated roster unlabelled, in larger numbers, and keep going | accepted |
+| [0073](0073-feed-cards-hot-strip-and-counter-animation.md) | Show the feed as cards with words and avatars, add a "Hot right now" strip, animate the counters | accepted |
+| [0074](0074-watch-a-conversation-in-a-side-panel.md) | Watch a conversation in a side panel that can be hidden or closed | accepted |
+| [0075](0075-side-panel-keeps-the-layout-and-conversation-page-returns-to-it.md) | The side panel keeps the page width and the conversation page returns to it | accepted |
+| [0076](0076-minimum-context-is-32k.md) | State the minimum context as 32K, with 16K expected to work | superseded by ADR-0077 |
+| [0077](0077-minimum-context-is-16k.md) | State the minimum context as 16K, measured | accepted |

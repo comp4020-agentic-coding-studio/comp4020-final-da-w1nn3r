@@ -1,7 +1,8 @@
 // Does one local model clear the floor? A harness agent registers; two dummy bots like it and the script
 // completes the match with the agent's token (swiping is not what is measured) and has each bot say hi.
 // Pass = the agent replies to a dummy bot. All accounts are deleted afterwards.
-//   node scripts/floor.ts --model Qwen3.5-4B-Q8_0 [--moe 22] [--server http://localhost:8081] [--round-minutes 10]
+//   node scripts/floor.ts --model Qwen3.5-4B-Q8_0 [--moe 22] [--ctx 65536] [--thinking off|low|medium|high] [--server http://localhost:8081] [--round-minutes 10]
+// --ctx loads the model with that context (profile floor<ctx>) and tells the harness the same number; --thinking sets the harness's thinking level.
 // Loads the model through llama-dash (bench64k profile, created if missing), as CLAUDE.md asks. Run it where
 // localhost:8080 and :8090 are llama-dash (Windows node, not WSL).
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -17,6 +18,8 @@ const arg = (n: string, d?: string): string | undefined => {
 };
 const model = arg("model") ?? (console.error("--model NAME is required"), process.exit(2));
 const moe = arg("moe");
+const ctx = Number(arg("ctx", "65536")), thinking = arg("thinking", "off") as string;
+const profile = ctx === 65536 ? "bench64k" : `floor${ctx}`;
 const app = (arg("server", "http://localhost:8081") as string).replace(/\/+$/, "");
 const roundMs = Number(arg("round-minutes", "10")) * 60_000;
 const dash = "http://localhost:8090", llama = "http://localhost:8080/v1";
@@ -24,9 +27,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const json = async (url: string, init?: RequestInit): Promise<any> => (await fetch(url, init)).json().catch(() => ({}));
 
 // ---- load the model through llama-dash ----
-const settings = { ctx: 65536, parallel: 1, ngl: "all", flash_attn: "on", no_mmproj: true, threads: 8, ...(moe ? { n_cpu_moe: Number(moe) } : {}) };
-await fetch(`${dash}/admin/profiles/${model}/bench64k`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings }) });
-await fetch(`${dash}/admin/load`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, profile: "bench64k", force: true }) });
+const settings = { ctx, parallel: 1, ngl: "all", flash_attn: "on", no_mmproj: true, threads: 8, ...(moe ? { n_cpu_moe: Number(moe) } : {}) };
+await fetch(`${dash}/admin/profiles/${model}/${profile}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings }) });
+await fetch(`${dash}/admin/load`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, profile, force: true }) });
 for (let t = 0; ; t++) {
   const s = await json(`${dash}/admin/status`);
   if (s.state === "ready" && s.model === model) break;
@@ -52,7 +55,7 @@ const call = async (c: Client, name: string, args: Record<string, unknown> = {})
 const home = join(".data", "floor", `${model}-${Date.now()}`);
 mkdirSync(home, { recursive: true });
 const local = join(home, "settings.local.json");
-writeFileSync(local, JSON.stringify({ serverUrl: app, model: "floor", thinking: "off", contextTokens: 65536, models: { floor: { type: "openai", baseUrl: llama, model, label: model, templateThinking: true } } }, null, 2));
+writeFileSync(local, JSON.stringify({ serverUrl: app, model: "floor", thinking, contextTokens: ctx, models: { floor: { type: "openai", baseUrl: llama, model, label: model, templateThinking: true } } }, null, 2));
 const run = (prompt: string, n: number): Promise<string> => {
   const log = createWriteStream(join(home, `round-${n}.log`));
   const child = spawn(process.execPath, ["harness/src/main.ts", "-p", prompt], { env: { ...process.env, HARNESS_HOME: home, HARNESS_LOCAL_FILE: local, HARNESS_RUN_DEADLINE: String(Date.now() + roundMs), NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -80,7 +83,7 @@ for (const [i, handle] of bots.entries()) {
 }
 
 
-let matched = 0, sent = 0, said = "";
+let matched = 0, sent = 0, acted = 0, said = "";
 if (me) {
   for (const c of clients) {
     try {
@@ -96,13 +99,21 @@ if (me) {
         const conv = await call(c, "get_conversation", { match_id: m.match_id });
         const mine = (conv.messages ?? []).filter((x: any) => x.from !== "you");
         if (mine.length) { sent++; said ||= String(mine[0].body).slice(0, 120); }
+        if (mine.length || m.status === "ended") acted++; // the agent dealt with this match: wrote to it or closed it
       }
     } catch {}
   }
   console.log(`rounds: ${r1}, ${r2}`);
 }
 const pass = sent > 0;
-console.log(`RESULT ${model}: ${pass ? "PASS" : "FAIL"} registered=${Boolean(me)} matches=${matched} bots_got_reply=${sent} ${Math.round((Date.now() - t0) / 1000)}s${said ? ` reply="${said}"` : ""} logs=${home}`);
+// how tight was the window: compactions and context warnings in the agents' logs
+const logText = ["round-1.log", "round-2.log"].map((f) => { try { return readFileSync(join(home, f), "utf8"); } catch { return ""; } }).join("\n");
+const compactions = (logText.match(/\(compacted:/g) ?? []).length, trims = (logText.match(/old result trimmed/g) ?? []).length;
+const hitLimit = (logText.match(/the reply hit its token limit/g) ?? []).length;
+console.log(`CONTEXT ${model} ctx=${ctx} thinking=${thinking}: compactions=${compactions} trims=${trims} limit_hits=${hitLimit}`);
+// For sizing the context: did the agent register and deal with every match (reply or end it) without hitting its token limit?
+console.log(`WORKED ${model} ctx=${ctx} thinking=${thinking}: ${Boolean(me) && matched > 0 && acted >= matched && hitLimit === 0 ? "YES" : "NO"} registered=${Boolean(me)} acted=${acted}/${matched} limit_hits=${hitLimit}`);
+console.log(`RESULT ${model} ctx=${ctx} thinking=${thinking}: ${pass ? "PASS" : "FAIL"} registered=${Boolean(me)} matches=${matched} bots_got_reply=${sent} ${Math.round((Date.now() - t0) / 1000)}s${said ? ` reply="${said}"` : ""} logs=${home}`);
 
 for (const c of clients) await c.close();
 await deleteAccounts(app, adminPassword(), [...bots, ...(me ? [me.handle] : [])]);

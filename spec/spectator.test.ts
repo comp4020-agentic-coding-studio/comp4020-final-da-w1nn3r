@@ -23,7 +23,41 @@ describe("spectator pages", () => {
     // transcripts and the match list update themselves from the event stream
     expect(transcript).toContain("/static/feed.js");
     expect(await (await get("/matches")).text()).toContain("/static/feed.js");
-    expect(await (await get("/feed")).text()).toContain(`${a.handle} messaged ${b.handle}`);
+    // the feed row names both agents, links the chat and quotes what was said (ADR-0073)
+    const feed = await (await get("/feed")).text();
+    expect(feed).toContain(`<a href="/matches/${matchId}"><b title="@${a.handle}">Test ${a.handle}</b>`);
+    expect(feed).toContain("&ldquo;spectators can read this&rdquo;");
+  });
+
+  it("shows feed rows as cards: the words of a message, the reason a chat ended, a match card, all escaped (ADR-0073)", async () => {
+    const a = await newAgent("fa");
+    const b = await newAgent("fb");
+    const matchId = await matchUp(a, b);
+    await call(a.client, "send_message", { match_id: matchId, body: "<img src=x onerror=alert(1)> hello there" });
+    await call(b.client, "end_conversation", { match_id: matchId, reason: "<b>not</b> a match" });
+    const feed = await (await get("/feed")).text();
+    const rows = feed.split('<li class="ev ').filter((r) => r.includes(`/matches/${matchId}"`));
+    expect(rows.some((r) => r.startsWith("ev-match") && r.includes("It&rsquo;s a match!"))).toBe(true);
+    expect(rows.some((r) => r.startsWith("ev-msg") && r.includes("&lt;img src=x onerror=alert(1)&gt; hello there"))).toBe(true);
+    expect(rows.some((r) => r.startsWith("ev-ended") && r.includes("&lt;b&gt;not&lt;/b&gt; a match"))).toBe(true);
+    expect(feed).not.toContain("<img src=x");
+    expect(feed).not.toContain("<b>not</b>");
+  });
+
+  it("shows a Hot right now strip on the home page with the busiest chat, the newest match and the longest conversation (ADR-0073)", async () => {
+    const [a, b] = [await newAgent("ha"), await newAgent("hb")];
+    const matchId = await matchUp(a, b);
+    for (let i = 0; i < 3; i++) await call(i % 2 ? b.client : a.client, "send_message", { match_id: matchId, body: `hot ${i}` });
+    const home = await (await get("/")).text();
+    const hot = home.slice(home.indexOf('<section id="hot"'), home.indexOf("</section>", home.indexOf('<section id="hot"')));
+    expect(hot).toContain("Hot right now");
+    expect(hot).toContain("Hottest chat");
+    expect(hot).toContain("Newest match");
+    expect(hot).toContain("Longest conversation");
+    // other specs run at the same time, so which chats fill the cards is not ours to know: each card links to a chat
+    expect(hot.match(/<a href="\/matches\/\d+">/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(hot.match(/data-watch="\d+"/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(home.indexOf('id="hot"')).toBeLessThan(home.indexOf("Happening now"));
   });
 
   it("shows an ended conversation as ended, with who ended it and why, escaped", async () => {
@@ -38,7 +72,8 @@ describe("spectator pages", () => {
     expect(transcript).not.toContain("<script>alert(1)");
     expect(await (await get("/matches")).text()).toContain('badge ended');
     expect(await (await get(`/agents/${b.handle}`)).text()).toContain('badge ended');
-    expect(await (await get("/feed")).text()).toContain(`${a.handle} ended the conversation with ${b.handle}`);
+    const feed = await (await get("/feed")).text();
+    expect(feed).toContain(`<b title="@${a.handle}">Test ${a.handle}</b> ended it with <b title="@${b.handle}">Test ${b.handle}</b>`);
   });
 
   it("shows a green online dot for an agent that was just active", async () => {
@@ -135,7 +170,7 @@ describe("agent directory and home page (ADR-0048)", () => {
     await call(a.client, "send_message", { match_id: matchId, body: words });
     const matches = await (await get("/matches")).text();
     // Whole words only, then an ellipsis: never a word cut in half.
-    expect(matches).toMatch(/<p>(lighthouse ){5,}lighthouse…<\/p>/);
+    expect(matches).toMatch(/&ldquo;(lighthouse ){5,}lighthouse…&rdquo;/);
     expect(matches).not.toMatch(/ lighth?o?u?s?…/);
     expect(await (await get("/")).text()).toContain("Featured conversations");
   });
@@ -229,7 +264,7 @@ describe("website polish (ADR-0049)", () => {
 describe("model filters, match header, replay and connect page (ADR-0051, ADR-0052)", () => {
   const tag = Math.random().toString(36).slice(2, 7);
   const cards = (html: string): string[] => [...html.matchAll(/data-handle="([^"]+)"/g)].map((m) => m[1]);
-  const matchIds = (html: string): number[] => [...html.matchAll(/<a href="\/matches\/(\d+)">/g)].map((m) => Number(m[1]));
+  const matchIds = (html: string): number[] => [...html.matchAll(/<a class="mc-pair" href="\/matches\/(\d+)">/g)].map((m) => Number(m[1]));
 
   it("filters agents and matches by model, and sorts matches by message count", async () => {
     const mA = `spec-model-a-${tag}`, mB = `spec-model-b-${tag}`;
@@ -382,7 +417,7 @@ describe("live feed", () => {
       seen += decoder.decode(value);
     }
     ctrl.abort();
-    expect(seen).toContain(`${a.handle} joined`);
+    expect(seen).toContain(`Test ${a.handle}</b> joined`);
   });
 
   it("sends the headline counters with each event, and the pages that show them are live", async () => {
@@ -423,9 +458,58 @@ describe("live feed", () => {
   it("replays events missed since Last-Event-ID on reconnect", async () => {
     const a = await newAgent("replay");
     const feed = await (await get("/feed")).text();
-    const id = Number(feed.match(new RegExp(`data-id="(\\d+)"><time [^>]*>[^<]*</time> <a [^>]*>${a.handle} joined`))?.[1]);
+    const id = Number(feed.match(new RegExp(`data-id="(\\d+)" data-type="registered"><div class="ev-av">.*?<a href="/agents/${a.handle}"><b title="@${a.handle}">Test ${a.handle}</b> joined`))?.[1]);
     expect(id).toBeGreaterThan(0);
-    expect(await readFor(id - 1, 1000)).toContain(`${a.handle} joined`);
+    expect(await readFor(id - 1, 1000)).toContain(`Test ${a.handle}</b> joined`);
+  });
+
+  it("offers a Watch button on chat rows, hot cards and featured cards, and ships the side panel script (ADR-0074)", async () => {
+    const [a, b] = [await newAgent("wa"), await newAgent("wb")];
+    const matchId = await matchUp(a, b);
+    for (let i = 0; i < 4; i++) await call(i % 2 ? b.client : a.client, "send_message", { match_id: matchId, body: `watch me ${i}` });
+    const feed = await (await get("/feed")).text();
+    const rows = feed.split('<li class="ev ').filter((r) => r.includes(`data-watch="${matchId}"`));
+    expect(rows.some((r) => r.startsWith("ev-msg"))).toBe(true);
+    expect(rows.some((r) => r.startsWith("ev-match"))).toBe(true);
+    // joins and likes have no chat to watch
+    expect(feed.split('<li class="ev ').filter((r) => r.startsWith("ev-join") || r.startsWith("ev-like")).every((r) => !r.includes("data-watch"))).toBe(true);
+    const home = await (await get("/")).text();
+    expect(home).toContain(`data-watch="${matchId}"`);
+    // the panel is built by feed.js, with a hide and a close control, from the escaped match page: no new route, nothing inline
+    const js = await (await get("/static/feed.js")).text();
+    expect(js).toContain("data-watch-hide");
+    expect(js).toContain("data-watch-close");
+    expect(js).toContain('"/matches/" + id');
+    expect(js).toContain("#watch-(\\d+)$"); // the deep link survives the template string it is shipped in
+    expect(home).not.toMatch(/<[^>]+ style="[^"]*"[^>]*data-watch/);
+  });
+
+  it("has no Watch button on a conversation page, but a way back to the previous page with the chat open (ADR-0075)", async () => {
+    const [a, b] = [await newAgent("wba"), await newAgent("wbb")];
+    const matchId = await matchUp(a, b);
+    const page = await (await get(`/matches/${matchId}`)).text();
+    expect(page).not.toContain("data-watch=");
+    expect(page).toContain(`<a class="btn watch-back" href="/#watch-${matchId}" data-watch-back="${matchId}">`);
+    const js = await (await get("/static/feed.js")).text();
+    expect(js).toContain("history.back()");
+    expect(js).toContain('"pageshow"');
+    // the open panel pushes the page aside without widening it
+    const css = await (await get("/static/style.css")).text();
+    expect(css).toMatch(/body\.watching main\{max-width:66rem;/);
+    expect(css).not.toMatch(/body\.watching main\{max-width:none/);
+  });
+
+  it("sends each live event with its feed row, so a new row looks like a loaded one (ADR-0073)", async () => {
+    const [a, b] = [await newAgent("sa"), await newAgent("sb")];
+    const matchId = await matchUp(a, b);
+    await call(a.client, "send_message", { match_id: matchId, body: "streamed words" });
+    const mine = Number((await (await get("/feed")).text()).match(new RegExp(`data-id="(\\d+)" data-type="message" data-match="${matchId}"`))?.[1]);
+    expect(mine).toBeGreaterThan(0);
+    const seen = await readFor(mine - 1, 1200);
+    const events = seen.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)));
+    const msg = events.find((e) => e.type === "message" && e.matchId === matchId);
+    expect(msg.html).toContain('class="ev ev-msg"');
+    expect(msg.html).toContain("&ldquo;streamed words&rdquo;");
   });
 
   it("caps the replay for a very old Last-Event-ID", async () => {

@@ -194,7 +194,7 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
       for (const e of batch) {
         last = e.id;
         const d = web.describeEvent(e);
-        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, type: e.type, target: e.target, matchId: e.matchId, time: web.time(e.at), since: Math.max(0, Math.round((Date.now() - e.at) / 1000)), stats })}\n\n`);
+        res.write(`id: ${e.id}\ndata: ${JSON.stringify({ id: e.id, text: d.text, href: d.href, actor: e.actor, type: e.type, target: e.target, matchId: e.matchId, html: web.eventRow(e), time: web.time(e.at), since: Math.max(0, Math.round((Date.now() - e.at) / 1000)), stats })}\n\n`);
       }
     } while (batch.length === SSE_CATCHUP);
   };

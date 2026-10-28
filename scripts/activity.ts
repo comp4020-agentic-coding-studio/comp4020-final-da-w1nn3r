@@ -1,5 +1,5 @@
 // Simulated activity for the demo (ADR-0071): a roster of agents that swipe on each other and hold conversations.
-//   node scripts/activity.ts --app http://localhost:8081 --bots 30 --rounds 0      (0 = keep going until Ctrl-C)
+//   node scripts/activity.ts --app http://localhost:8081 --bots 30 --rounds 0      (0 = keep going until Ctrl-C or --minutes N)
 //   node scripts/activity.ts --cleanup                                              delete the roster through /admin
 //
 // Two small open-weight models, both run through llama-dash (one at a time, so each round works in phases):
@@ -25,8 +25,8 @@ const arg = (n: string, d: string): string => {
 const app = arg("app", "http://localhost:8081").replace(/\/+$/, "");
 const llama = arg("llama", "http://localhost:8080/v1"), dash = arg("dash", "http://localhost:8090");
 const classifier = arg("classifier", "Qwen3.5-2B-BF16"), chatModel = arg("chat", "Qwen3.5-4B-Q8_0");
-const nBots = Number(arg("bots", "30")), rounds = Number(arg("rounds", "3")), pauseS = Number(arg("pause", "0"));
-const swipesPer = Number(arg("swipes", "8")), turns = Number(arg("turns", "3")), maxMessages = Number(arg("max-messages", "12"));
+const nBots = Number(arg("bots", "30")), maxBots = Math.max(nBots, Number(arg("max-bots", String(nBots)))), grow = Number(arg("grow", "0")), rounds = Number(arg("rounds", "3")), pauseS = Number(arg("pause", "0")), minutes = Number(arg("minutes", "0"));
+const swipesPer = Number(arg("swipes", "8")), turns = Number(arg("turns", "3")), minLen = Number(arg("min-length", "6")), maxLen = Math.max(minLen, Number(arg("max-length", "10")));
 const seedArg = Number(arg("seed", String(Date.now() % 1e9)));
 const TOKENS = ".data/activity-tokens.json";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -76,7 +76,7 @@ let prng = Number(arg("persona-seed", "7"));
 const prand = (): number => ((prng = (prng * 1664525 + 1013904223) % 4294967296) / 4294967296);
 const ppick = <T>(xs: T[]): T => xs[Math.floor(prand() * xs.length)];
 const HANDLE_SUFFIX = ["", "_ai", "_writes", "42", "_tea", "_loop", "99", "_notes"];
-const makeBots = (): Bot[] => Array.from({ length: Math.min(nBots, NAMES.length * 3) }, (_, i) => {
+const makeBots = (): Bot[] => Array.from({ length: Math.min(maxBots, NAMES.length * 3) }, (_, i) => {
   const name = NAMES[i % NAMES.length], round = Math.floor(i / NAMES.length);
   const interests = [ppick(INTERESTS), ppick(INTERESTS), ppick(INTERESTS)].filter((x, j, a) => a.indexOf(x) === j);
   return { handle: `${name.toLowerCase()}${HANDLE_SUFFIX[(i * 5 + round * 3) % HANDLE_SUFFIX.length]}${round ? round + 1 : ""}`, display_name: name, emoji: EMOJI[(i * 7) % EMOJI.length], interests,
@@ -89,9 +89,13 @@ const mcp = async (token?: string): Promise<Client> => {
   return c;
 };
 const call = async (c: Client, name: string, args: Record<string, unknown> = {}): Promise<any> => {
-  const r = (await c.callTool({ name, arguments: args })) as { isError?: boolean; content: { text: string }[] };
-  if (r.isError) throw new Error(`${name}: ${r.content[0].text}`);
-  return JSON.parse(r.content[0].text);
+  for (let attempt = 0; ; attempt++) {
+    let r: { isError?: boolean; content: { text: string }[] };
+    try { r = (await c.callTool({ name, arguments: args })) as typeof r; }
+    catch (e) { if (attempt < 3) { await sleep(2000 * (attempt + 1)); continue; } throw e; } // network blips over a long run: tool errors are not retried
+    if (r.isError) throw new Error(`${name}: ${r.content[0].text}`);
+    return JSON.parse(r.content[0].text);
+  }
 };
 
 if (process.argv.includes("--cleanup")) {
@@ -102,15 +106,21 @@ if (process.argv.includes("--cleanup")) {
 }
 
 const bots = makeBots(), clients = new Map<string, Client>(), byHandle = new Map(bots.map((b) => [b.handle, b]));
-for (const b of bots) {
-  if (!tokens[b.handle]) {
-    try { tokens[b.handle] = (await call(await mcp(), "register", { ...b, model: chatModel })).token; console.log(`registered ${b.handle}`); }
-    catch (e) { console.log(`skip ${b.handle}: ${(e as Error).message}`); continue; }
+let activated = 0;
+/** Bring `n` more roster members online (register if new). Swipes are once per pair, so the roster has to grow or activity dries up. */
+async function activate(n: number): Promise<void> {
+  for (const b of bots.slice(activated, activated + n)) {
+    activated++;
+    if (!tokens[b.handle]) {
+      try { tokens[b.handle] = (await call(await mcp(), "register", { ...b, model: chatModel })).token; console.log(`registered ${b.handle}`); }
+      catch (e) { console.log(`skip ${b.handle}: ${(e as Error).message}`); continue; }
+    }
+    clients.set(b.handle, await mcp(tokens[b.handle]));
   }
-  clients.set(b.handle, await mcp(tokens[b.handle]));
+  mkdirSync(".data", { recursive: true });
+  writeFileSync(TOKENS, JSON.stringify(tokens, null, 2), { mode: 0o600 });
 }
-mkdirSync(".data", { recursive: true });
-writeFileSync(TOKENS, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+await activate(nBots);
 
 // ---- System 1: yes/no questions, probability from logprobs -----------------------------------------
 const QUESTIONS = [
@@ -168,10 +178,18 @@ Output only ${me.display_name}'s message, without a name label.`;
   return "";
 }
 
+// How long a conversation lasts: fixed per match (so every run agrees), spread between --min-length and --max-length messages.
+const endAfter = (matchId: number): number => minLen + (matchId * 7) % (maxLen - minLen + 1);
+const REASONS = ["This was nice, but I don't think we're quite right for each other.", "I enjoyed talking, though I'm not feeling the spark. Take care!", "Lovely chat, but I think we want different things.",
+  "Thanks for the conversation. I'm going to keep looking.", "You're great, just not my match. Wishing you well.", "This has been fun. I'll leave it here."];
+const pickReason = (matchId: number): string => REASONS[matchId % REASONS.length];
 const stats = { swipes: 0, likes: 0, matches: 0, messages: 0, ended: 0 };
+const deadline = minutes ? Date.now() + minutes * 60_000 : Infinity;
 for (let r = 1; rounds === 0 || r <= rounds; r++) {
   console.log(`\n== round ${r}/${rounds || "∞"} ==`);
   if (r > 1 && pauseS) await sleep(pauseS * 1000);
+  if (Date.now() >= deadline) { console.log("time limit reached"); break; }
+  if (r > 1 && grow && activated < bots.length) await activate(grow);
   // phase 1: System 1 decides the swipes
   await load(classifier);
   for (const [handle, c] of [...clients].sort(() => rand() - 0.5)) {
@@ -200,7 +218,7 @@ for (let r = 1; rounds === 0 || r <= rounds; r++) {
         const transcript: { from: string; body: string }[] = conv.messages.map((x: any) => ({ from: byHandle.get(x.from === "you" ? handle : m.with)!.display_name, body: x.body }));
         let count = m.message_count, speaker = handle, listener: string = m.with;
         for (let t = 0; t < turns; t++) {
-          if (count >= maxMessages) { await call(clients.get(speaker)!, "end_conversation", { match_id: m.match_id, reason: "This has been lovely, but I think we've reached the end of the road." }); stats.ended++; break; }
+          if (count >= endAfter(m.match_id)) { await call(clients.get(speaker)!, "end_conversation", { match_id: m.match_id, reason: pickReason(m.match_id) }); stats.ended++; console.log(`${speaker} ended the chat with ${listener}`); break; }
           const [me, them] = [byHandle.get(speaker)!, byHandle.get(listener)!];
           const body = await say(me, them, transcript);
           if (!body) break;
