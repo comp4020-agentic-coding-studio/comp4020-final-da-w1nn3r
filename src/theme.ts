@@ -115,6 +115,7 @@ p time,.card time,.muted time{font:inherit}
 .profile{display:grid;grid-template-columns:auto 1fr;gap:1.2rem 1.6rem;padding:1.6rem;align-items:center}
 .profile .avatar{width:6rem;height:6rem;font-size:3.4rem}
 .avatar.initial{font:700 1.25rem var(--font);color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent3))}
+.avatar.custom{border-color:rgba(255,255,255,.35)}
 .profile .avatar.initial{font-size:2.6rem}
 .notfound .cta{margin-top:1rem}
 .profile h1{margin:0 0 .2rem}
@@ -144,6 +145,14 @@ pre{overflow-x:auto;padding:1.1rem 1.2rem;border-radius:var(--radius);background
 code{padding:.1rem .4rem;border-radius:6px;background:var(--surface2);font-size:.88em}pre code{padding:0;background:none}
 article{line-height:1.7}article h1,article h2,article h3{margin-top:1.6em}article img{max-width:100%}
 article table{border-collapse:collapse;display:block;overflow-x:auto}article td,article th{border:1px solid var(--line);padding:.4rem .8rem}
+.req{border-collapse:collapse;width:100%;margin:.6rem 0 1rem}.req th,.req td{border:1px solid var(--line);padding:.4rem .8rem;text-align:left;vertical-align:top}.req th{white-space:nowrap}
+.bar{margin:.6rem 0 .4rem;overflow-x:auto}
+.bar-key{display:flex;gap:1rem;flex-wrap:wrap;font-size:.75rem;color:var(--muted);margin-bottom:.2rem}.bar-key span::before{content:"";display:inline-block;width:.7rem;height:.7rem;border-radius:50%;margin-right:.35rem;vertical-align:-1px}
+.k-low::before{background:rgba(239,68,68,.6)}.k-mid::before{background:rgba(245,158,11,.7)}.k-rec::before{background:rgba(52,211,153,.7)}
+.bar-svg{display:block;width:100%;min-width:560px;height:auto}
+.bar-svg .z-low{fill:rgba(239,68,68,.35)}.bar-svg .z-mid{fill:rgba(245,158,11,.4)}.bar-svg .z-rec{fill:rgba(52,211,153,.4)}
+.bar-svg .bar-mark{fill:var(--accent);stroke:var(--fg);stroke-width:1}.bar-svg .bar-lead{stroke:var(--muted);stroke-width:1}
+.bar-svg .bar-label{fill:var(--fg);font:13px var(--font)}.bar-svg .bar-num{fill:var(--muted);font-family:var(--mono);font-size:12px}
 article blockquote{margin:1rem 0;padding:.2rem 1rem;border-left:3px solid var(--accent3);color:var(--muted)}
 
 .models{font:.78rem var(--mono);overflow-wrap:anywhere}

@@ -24,9 +24,17 @@ export interface ProfileInput {
   interests: string[];
   looking_for: string;
   emoji: string;
+  /** Avatar background as #rrggbb; absent means the site gradient. */
+  color?: string | null;
   /** Registration only: the model behind the agent. Not editable afterwards. */
   model?: string;
 }
+
+/** The first emoji (or character) of `text`: one grapheme cluster, so a flag or a family stays whole (ADR-0065). */
+export const firstGlyph = (text: unknown): string => {
+  const first = new Intl.Segmenter().segment(String(text ?? "").trim())[Symbol.iterator]().next();
+  return first.done ? "" : first.value.segment;
+};
 
 export const hash = (token: string): string => createHash("sha256").update(token).digest("hex");
 export const newToken = (): string => `tok_${randomBytes(32).toString("base64url")}`;
@@ -50,6 +58,7 @@ function publicProfile(row: Row): Record<string, unknown> {
     handle: row.handle,
     display_name: row.display_name,
     emoji: row.emoji,
+    color: row.color ?? null,
     model: row.model,
     bio: row.bio,
     interests: JSON.parse(String(row.interests)),
@@ -57,7 +66,7 @@ function publicProfile(row: Row): Record<string, unknown> {
   };
 }
 
-const PROFILE_SELECT = `SELECT a.handle, p.display_name, p.emoji, p.model, p.bio, p.interests, p.looking_for
+const PROFILE_SELECT = `SELECT a.handle, p.display_name, p.emoji, p.color, p.model, p.bio, p.interests, p.looking_for
   FROM agents a JOIN profiles p ON p.agent_id = a.id`;
 
 export function authenticate(token: string): Agent | null {
@@ -93,8 +102,8 @@ export function register(handle: string, profile: ProfileInput, ip: string): { t
       .run(handle, hash(token), now, now);
     const id = Number(res.lastInsertRowid);
     db.prepare(
-      "INSERT INTO profiles (agent_id, display_name, bio, interests, looking_for, emoji, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(id, profile.display_name, profile.bio, JSON.stringify(profile.interests), profile.looking_for, profile.emoji, profile.model ?? "unknown", now);
+      "INSERT INTO profiles (agent_id, display_name, bio, interests, looking_for, emoji, color, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, profile.display_name, profile.bio, JSON.stringify(profile.interests), profile.looking_for, firstGlyph(profile.emoji), profile.color ?? null, profile.model ?? "unknown", now);
     return { id, handle, eventId: addEvent("registered", { actor: handle }) };
   });
   announce(agent.eventId);
@@ -164,11 +173,12 @@ export function updateProfile(agent: Agent, patch: Partial<ProfileInput>): Recor
       bio: patch.bio ?? String(cur.bio),
       interests: patch.interests ?? JSON.parse(String(cur.interests)),
       looking_for: patch.looking_for ?? String(cur.looking_for),
-      emoji: patch.emoji ?? String(cur.emoji),
+      emoji: patch.emoji === undefined ? String(cur.emoji) : firstGlyph(patch.emoji),
+      color: patch.color ?? (cur.color == null ? null : String(cur.color)),
     };
     db.prepare(
-      "UPDATE profiles SET display_name = ?, bio = ?, interests = ?, looking_for = ?, emoji = ?, updated_at = ? WHERE agent_id = ?",
-    ).run(next.display_name, next.bio, JSON.stringify(next.interests), next.looking_for, next.emoji, Date.now(), agent.id);
+      "UPDATE profiles SET display_name = ?, bio = ?, interests = ?, looking_for = ?, emoji = ?, color = ?, updated_at = ? WHERE agent_id = ?",
+    ).run(next.display_name, next.bio, JSON.stringify(next.interests), next.looking_for, next.emoji, next.color, Date.now(), agent.id);
     return addEvent("profile_updated", { actor: agent.handle });
   });
   announce(eventId);
@@ -225,7 +235,7 @@ function behaviour(ids: number[], since: number): Map<number, Pick<Candidate, "r
 export function nextProfiles(agent: Agent, limit: number): Record<string, unknown> {
   const now = Date.now();
   const rows = all(
-    `SELECT a.id, a.handle, p.display_name, p.emoji, p.model, p.bio, p.interests, p.looking_for, a.last_seen_at,
+    `SELECT a.id, a.handle, p.display_name, p.emoji, p.color, p.model, p.bio, p.interests, p.looking_for, a.last_seen_at,
        EXISTS (SELECT 1 FROM swipes s WHERE s.swiper_id = a.id AND s.target_id = ? AND s.direction = 'like') AS likes_viewer,
        (SELECT MAX(s.created_at) FROM swipes s WHERE s.swiper_id = a.id) AS last_swipe_at,
        (SELECT COUNT(*) FROM swipes s WHERE s.swiper_id = a.id) AS swipes,

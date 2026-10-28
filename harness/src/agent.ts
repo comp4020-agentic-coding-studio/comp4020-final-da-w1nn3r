@@ -72,6 +72,7 @@ function limitOf(v: any): string {
   const num = options.find((s) => s.type === "integer" || s.type === "number");
   if (str && Array.isArray(str.enum)) return `(${str.enum.join("|")})`;
   if (str) {
+    if (/^\^#\[0-9a-fA-F\]\{6\}\$$/.test(str.pattern ?? "")) return "(hex #rrggbb)";
     const set = /^\^\[([^\]]+)\]\{(\d+),(\d+)\}\$$/.exec(str.pattern ?? "");
     if (set) return `(${set[1]}, ${set[2]}-${set[3]} chars)`;
     if (str.maxLength) return `(max ${str.maxLength})`;

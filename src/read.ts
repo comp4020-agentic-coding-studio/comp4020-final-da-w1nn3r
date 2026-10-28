@@ -108,7 +108,7 @@ export function listAgents(f: AgentFilter = parseAgentFilter(new URLSearchParams
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
   return {
     rows: all(
-      `SELECT a.handle, p.display_name, p.emoji, p.model, p.bio, p.interests, a.created_at, a.last_seen_at, ${ACTIONS} AS actions
+      `SELECT a.handle, p.display_name, p.emoji, p.color, p.model, p.bio, p.interests, a.created_at, a.last_seen_at, ${ACTIONS} AS actions
        ${from} ORDER BY ${ORDER[f.sort]} LIMIT 200`,
       ...args,
     ),
@@ -118,7 +118,7 @@ export function listAgents(f: AgentFilter = parseAgentFilter(new URLSearchParams
 
 export function agentDetail(handle: string): { profile: Row; matches: Row[]; likesGiven: number; likesReceived: number; passesGiven: number } | null {
   const profile = one(
-    `SELECT a.id, a.handle, p.display_name, p.emoji, p.model, p.bio, p.interests, p.looking_for, a.created_at, a.last_seen_at
+    `SELECT a.id, a.handle, p.display_name, p.emoji, p.color, p.model, p.bio, p.interests, p.looking_for, a.created_at, a.last_seen_at
      FROM agents a JOIN profiles p ON p.agent_id = a.id WHERE a.handle = ?`,
     handle,
   );
@@ -217,7 +217,7 @@ export const MAX_TRANSCRIPT = 500;
 export function matchDetail(id: number): { match: Row; messages: Row[]; total: number } | null {
   const match = one(
     `SELECT x.id, x.created_at, x.ended_at, x.end_reason, e.handle AS ended_by, a.handle AS a_handle, b.handle AS b_handle,
-       pa.display_name AS a_name, pa.emoji AS a_emoji, pa.model AS a_model, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.model AS b_model
+       pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pa.model AS a_model, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color, pb.model AS b_model
      FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b
      LEFT JOIN profiles pa ON pa.agent_id = a.id LEFT JOIN profiles pb ON pb.agent_id = b.id
      LEFT JOIN agents e ON e.id = x.ended_by WHERE x.id = ?`,

@@ -284,7 +284,7 @@ function dashboard(q: string, flash: string): string {
 
 function agentView(handle: string, flash: string): AdminResponse | null {
   const a = one(
-    `SELECT a.id, a.handle, a.created_at, a.last_seen_at, p.display_name, p.bio, p.interests, p.looking_for, p.emoji, p.model
+    `SELECT a.id, a.handle, a.created_at, a.last_seen_at, p.display_name, p.bio, p.interests, p.looking_for, p.emoji, p.color, p.model
      FROM agents a LEFT JOIN profiles p ON p.agent_id = a.id WHERE a.handle = ?`,
     handle,
   );

@@ -166,6 +166,16 @@ describe("website polish (ADR-0049)", () => {
     expect(await (await get(`/agents?q=${q.handle}`)).text()).toContain('avatar initial');
   });
 
+  it("shows one emoji on a two-emoji avatar and the colour the agent picked (ADR-0065)", async () => {
+    const two = await newAgent("two", { emoji: "🦊🐙", color: "#7c3aed" });
+    const page = await (await get(`/agents/${two.handle}`)).text();
+    expect(page).toContain('<span class="avatar custom" style="background:#7c3aed">🦊</span>');
+    expect(page).not.toContain("🐙");
+    // A colour that is not #rrggbb is refused, so it can never reach a style attribute.
+    const bad = await call(two.client, "update_profile", { color: 'red;" onmouseover="x' });
+    expect(bad.isError).toBe(true);
+  });
+
   it("explains a 404 and links back, naming the missing agent or match, escaped", async () => {
     const res = await get("/agents/nobody_here_xyz");
     expect(res.status).toBe(404);

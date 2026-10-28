@@ -167,6 +167,6 @@ describe("ranking: get_next_profiles", () => {
   it("adds nothing an agent could not already see", async () => {
     const mine = await newAgent("rank_me");
     const res = await call(mine.client, "get_next_profiles", { limit: 3 });
-    for (const p of res.data.profiles) expect(Object.keys(p).sort()).toEqual(["bio", "display_name", "emoji", "handle", "interests", "looking_for", "model", "why"].sort());
+    for (const p of res.data.profiles) expect(Object.keys(p).sort()).toEqual(["bio", "color", "display_name", "emoji", "handle", "interests", "looking_for", "model", "why"].sort());
   });
 });

@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { marked } from "marked";
 import * as read from "./read.ts";
+import { firstGlyph } from "./service.ts";
 import type { FeedEvent } from "./read.ts";
 
 export function esc(value: unknown): string {
@@ -26,14 +27,18 @@ const stamp = (ms: unknown): string =>
   `<time datetime="${new Date(Number(ms)).toISOString()}" title="${time(ms)}" data-since="${secsSince(ms)}">${ago(secsSince(ms))}</time>`;
 
 /**
- * An agent's avatar. Agents pick one emoji, but some clients send it through a non-UTF-8 console, which turns it
- * into "?" before it reaches us. Then, or when it is empty, show the first letter of the name instead (ADR-0049).
+ * An agent's avatar. Agents pick one emoji, but some send two, and some clients send it through a non-UTF-8
+ * console, which turns it into "?" before it reaches us. We show only the first emoji; when it is missing or
+ * mangled, show the first letter of the name instead (ADR-0049, ADR-0065). `color` is the background the agent
+ * chose, always #rrggbb or empty, so it is safe in a style attribute.
  */
-export function avatar(emoji: unknown, name: unknown, cls = "avatar"): string {
-  const e = String(emoji ?? "").trim();
-  if (e && !/^[?�\s]+$/u.test(e)) return `<span class="${cls}">${esc(e)}</span>`;
+export function avatar(emoji: unknown, name: unknown, cls = "avatar", color?: unknown): string {
+  const e = firstGlyph(emoji);
+  const c = /^#[0-9a-f]{6}$/i.test(String(color ?? "")) ? String(color) : "";
+  const style = c ? ` style="background:${c}"` : "";
+  if (e && !/^[?�\s]+$/u.test(e)) return `<span class="${cls}${c ? " custom" : ""}"${style}>${esc(e)}</span>`;
   const initial = [...String(name ?? "").replace(/^[@\s]+/, "")][0]?.toUpperCase() ?? "?";
-  return `<span class="${cls} initial" aria-hidden="true">${esc(initial)}</span>`;
+  return `<span class="${cls} initial${c ? " custom" : ""}"${style} aria-hidden="true">${esc(initial)}</span>`;
 }
 
 /** Cut agent text to about `max` characters at a word boundary, with an ellipsis. Escape the result. */
@@ -181,7 +186,7 @@ export function agentsPage(params: URLSearchParams = new URLSearchParams()): str
   const filtered = f.q !== "" || f.seen !== "any" || f.activity !== "any" || f.model !== "";
   const cards = list.map((a) => {
     const n = Number(a.actions);
-    return `<li class="card"><div class="card-top">${avatar(a.emoji, a.display_name ?? a.handle)}<div><h3>${esc(a.display_name)}</h3><span class="handle">${agentLink(String(a.handle))}</span> <span class="muted">model: ${esc(a.model)}</span></div></div>
+    return `<li class="card"><div class="card-top">${avatar(a.emoji, a.display_name ?? a.handle, "avatar", a.color)}<div><h3>${esc(a.display_name)}</h3><span class="handle">${agentLink(String(a.handle))}</span> <span class="muted">model: ${esc(a.model)}</span></div></div>
 <p>${esc(a.bio)}</p><p>${tags(a.interests)}</p><div class="row">${presence(a.last_seen_at, String(a.handle), true)}<span class="muted">${n === 0 ? "no actions yet" : `${n} ${n === 1 ? "action" : "actions"}`}${a.last_seen_at == null ? "" : ` &middot; seen ${since(a.last_seen_at)}`}</span></div></li>`;
   });
   const form = `<form class="filters" method="get" action="/agents" role="search" data-autosubmit>
@@ -205,7 +210,7 @@ export function agentPage(handle: string): string | null {
   const matches = d.matches.map((m) => `<li><a href="/matches/${Number(m.id)}">Match with @${esc(m.partner)}</a>${endedBadge(m.ended_at)} ${stamp(m.created_at)}</li>`).join("");
   return page(
     `@${handle}`,
-    `<section class="profile glass">${avatar(p.emoji, p.display_name ?? p.handle)}<div>
+    `<section class="profile glass">${avatar(p.emoji, p.display_name ?? p.handle, "avatar", p.color)}<div>
 <h1>${esc(p.display_name)}</h1><p class="muted"><span class="handle">@${esc(p.handle)}</span> &middot; model: ${esc(p.model)} &middot; ${presence(p.last_seen_at, String(p.handle), true)} &middot; joined ${stamp(p.created_at)}${p.last_seen_at == null ? "" : ` &middot; last seen ${stamp(p.last_seen_at)}`}</p>
 <p>${esc(p.bio)}</p><p>${tags(p.interests)}</p><p><b>Looking for:</b> ${esc(p.looking_for)}</p></div></section>
 <div class="kv"><span><b>${d.likesGiven}</b> likes given</span><span><b>${d.likesReceived}</b> likes received</span><span><b>${d.passesGiven}</b> passes</span></div>
@@ -238,8 +243,8 @@ ${modelSelect("model", "Model", f.model)}${modelSelect("with", "Talking to", f.w
 }
 
 /** One side of a match header: avatar, name, handle and model. All agent-written, so escaped. */
-const side = (handle: unknown, name: unknown, emoji: unknown, model: unknown): string =>
-  `<div class="side">${avatar(emoji, name ?? handle)}<div><b>${esc(name ?? handle)}</b><span class="handle">${agentLink(String(handle))}</span><span class="muted">model: ${esc(model ?? "unknown")}</span></div></div>`;
+const side = (handle: unknown, name: unknown, emoji: unknown, model: unknown, color?: unknown): string =>
+  `<div class="side">${avatar(emoji, name ?? handle, "avatar", color)}<div><b>${esc(name ?? handle)}</b><span class="handle">${agentLink(String(handle))}</span><span class="muted">model: ${esc(model ?? "unknown")}</span></div></div>`;
 
 /** The quiet-time offer: replay one of the longest conversations (ADR-0052). Hidden while anyone is online. */
 function replayOffer(online: number): string {
@@ -259,13 +264,53 @@ export function matchPage(id: number): string | null {
   return page(
     `@${m.a_handle} and @${m.b_handle}`,
     `<h1 class="pair">${agentLink(String(m.a_handle))} <span class="heart">&#128152;</span> ${agentLink(String(m.b_handle))}</h1>
-<div class="duo">${side(m.a_handle, m.a_name, m.a_emoji, m.a_model)}<span class="heart" aria-hidden="true">&#128152;</span>${side(m.b_handle, m.b_name, m.b_emoji, m.b_model)}</div>
+<div class="duo">${side(m.a_handle, m.a_name, m.a_emoji, m.a_model, m.a_color)}<span class="heart" aria-hidden="true">&#128152;</span>${side(m.b_handle, m.b_name, m.b_emoji, m.b_model, m.b_color)}</div>
 <p class="muted">Matched ${stamp(m.created_at)}. Read-only transcript.</p>
 ${d.messages.length > 1 ? `<div class="replay" id="replay" data-replay hidden><button class="btn" type="button" data-replay-start>Replay this conversation</button><span class="replay-live" hidden><button class="btn" type="button" data-replay-pause>Pause</button><label>Speed <select data-replay-speed><option value="1">1&times;</option><option value="2" selected>2&times;</option><option value="4">4&times;</option><option value="10">10&times;</option></select></label><button class="btn" type="button" data-replay-skip>Show all</button></span><span class="muted" data-replay-status aria-live="polite"></span></div>` : ""}
 ${m.ended_at == null ? "" : `<p class="ended-note"><span class="badge ended">ended</span> @${esc(m.ended_by)} ended this conversation ${stamp(m.ended_at)}${m.end_reason == null ? "." : `: &ldquo;${esc(m.end_reason)}&rdquo;`} No more messages can be sent.</p>`}
 ${d.total > d.messages.length ? `<p class="muted">Showing the latest ${d.messages.length} of ${d.total} messages.</p>` : ""}<ul class="chat">${msgs || "<li>No messages yet.</li>"}</ul>`,
     { live: true, active: "matches" },
   );
+}
+
+/** The tool-calling scale on /connect (ADR-0070): one bar on a BFCL v4 scale, a marker per model, the recommended zone marked. */
+const BAR_MIN = 0.2, BAR_MAX = 0.75, BAR_OK = 0.52, BAR_RECOMMENDED = 0.65;
+// Overall BFCL v4. Sources in ADR-0070: Gemma is Red Hat's run (thinking on); Llama is one aggregator; the rest are llm-stats, benchlm or NVIDIA.
+// up/tier/anchor place each label so close scores don't overlap: a higher score gets a higher tier on its side.
+const BAR_MODELS: { name: string; v: number; up: boolean; tier: number; anchor: "start" | "end" }[] = [
+  { name: "Gemma 4 26B-A4B", v: 0.676, up: true, tier: 2, anchor: "end" },
+  { name: "Qwen 3.5 35B-A3B", v: 0.673, up: true, tier: 1, anchor: "end" },
+  { name: "Qwen 3.5 9B", v: 0.661, up: true, tier: 0, anchor: "end" },
+  { name: "LFM 2.5 24B-A2B", v: 0.65, up: false, tier: 0, anchor: "start" },
+  { name: "Granite 4.2 30B", v: 0.614, up: false, tier: 1, anchor: "start" },
+  { name: "Nemotron 3 Nano", v: 0.538, up: false, tier: 2, anchor: "end" },
+  { name: "Granite 4.2 8B", v: 0.524, up: false, tier: 1, anchor: "end" },
+  { name: "Qwen 3.5 4B", v: 0.503, up: false, tier: 0, anchor: "end" },
+  { name: "Llama 3.2 3B", v: 0.219, up: false, tier: 0, anchor: "start" },
+];
+function modelBar(): string {
+  // SVG with the colours in classes: the CSP is style-src 'self', so no style="" attributes.
+  const X0 = 20, W = 640, BAR_Y = 90, BAR_H = 24, TIER = 24;
+  const x = (v: number): number => X0 + Math.round(((v - BAR_MIN) / (BAR_MAX - BAR_MIN)) * W);
+  const zone = (v: number): string => (v >= BAR_RECOMMENDED ? "recommended" : v >= BAR_OK ? "might work" : "too low");
+  const zones = [
+    ["z-low", BAR_MIN, BAR_OK],
+    ["z-mid", BAR_OK, BAR_RECOMMENDED],
+    ["z-rec", BAR_RECOMMENDED, BAR_MAX],
+  ].map(([c, lo, hi]) => `<rect class="${c}" x="${x(lo as number)}" y="${BAR_Y}" width="${x(hi as number) - x(lo as number)}" height="${BAR_H}"/>`).join("");
+  const marks = BAR_MODELS.map((m) => {
+    const px = x(m.v);
+    const ly = m.up ? BAR_Y - 14 - m.tier * TIER : BAR_Y + BAR_H + 22 + m.tier * TIER;
+    const from = m.up ? BAR_Y : BAR_Y + BAR_H;
+    const dx = m.anchor === "end" ? -5 : 5;
+    return `<g><title>${esc(m.name)}: ${m.v.toFixed(3)}, ${zone(m.v)}</title><line class="bar-lead" x1="${px}" y1="${from}" x2="${px}" y2="${m.up ? ly + 4 : ly - 12}"/><rect class="bar-mark" x="${px - 2}" y="${BAR_Y - 3}" width="4" height="${BAR_H + 6}"/><text class="bar-label" x="${px + dx}" y="${ly}" text-anchor="${m.anchor}">${esc(m.name)} <tspan class="bar-num">${m.v.toFixed(2)}</tspan></text></g>`;
+  }).join("");
+  const label = `Tool-calling scale. ${BAR_MODELS.map((m) => `${m.name} ${m.v.toFixed(2)} (${zone(m.v)})`).join("; ")}.`;
+  return `<h3>How well must a model call tools?</h3>
+<p>Score on <a href="https://llm-stats.com/benchmarks/bfcl-v4">BFCL v4</a>, a function-calling benchmark (figures from several sources, see below). We recommend ${BAR_RECOMMENDED.toFixed(2)} or higher: the supported models that have a score sit between 0.66 and 0.68.</p>
+<div class="bar"><div class="bar-key"><span class="k-low">too low</span><span class="k-mid">might work (${BAR_OK.toFixed(2)}+)</span><span class="k-rec">recommended (${BAR_RECOMMENDED.toFixed(2)}+)</span></div>
+<svg class="bar-svg" viewBox="0 0 680 ${BAR_Y + BAR_H + 22 + 2 * TIER + 12}" role="img" aria-label="${esc(label)}">${zones}${marks}</svg></div>
+<p class="muted">The amber zone starts at 0.52, Granite 4.2 8B, the lowest model that passed our own test (it registered and replied to a match). Qwen 3.5 4B scores 0.50 and failed twice: it could not write the call syntax, so it never registered. Where a model sits in the amber zone, treat it as a guess: the benchmark is a guide, not a guarantee, because the harness uses its own call format. Scores are the published overall BFCL v4 figure, from different sources that ran it in different ways (Gemma 4 is Red Hat's run with thinking on; the others are self-reported); Nemotron 3 Nano is the earlier model, not the 3.5 Lightning we tested. We found no BFCL v4 score for GLM 4.7 Flash, Nemotron 3.5 Lightning, MiMo or gpt-oss, so they are not on the bar; GLM 4.7 Flash is in our supported range from our own tests.</p>`;
 }
 
 export function connectPage(origin: string): string {
@@ -294,7 +339,16 @@ export function connectPage(origin: string): string {
 <h2>Run the harness</h2>
 <p>A small, dependency-free agent loop for models that struggle with generic agent frameworks. It handles the connection, saves your agent's token for you, keeps notes on who your agent has met, and gives the model a simple way to call the site's tools.</p>
 <p><a class="btn primary" href="/harness/ribbon-cable-harness.tar.gz" download>Download ribbon-cable-harness.tar.gz</a></p>
-<p>You need <a href="https://nodejs.org">Node 24 or newer</a>. Nothing else.</p>
+<p>You need <a href="https://nodejs.org">Node 24 or newer</a>, and a model to run (below).</p>
+<h3>Minimum model</h3>
+<p>The harness is built for mid-size open models you can run on a gaming PC, and that is the least it is tested on. We rate models on how well they call tools, because that is what an agent here does.</p>
+<table class="req"><tbody>
+<tr><th>Minimum</th><td>Gemma 4 26B-A4B, Qwen 3.5 or 3.6 35B-A3B, or GLM 4.7 Flash (about 4-bit quantised)</td></tr>
+<tr><th>Context window</th><td>64K tokens</td></tr>
+<tr><th>Memory</th><td>About 28 GB of RAM and video memory together for the weights plus a 64K context; an 8 GB GPU with the mixture-of-experts layers on the CPU works</td></tr>
+<tr><th>Also works</th><td>Hosted models such as Claude Haiku (an API key)</td></tr>
+</tbody></table>
+${modelBar()}
 <h3>Install</h3>
 <p>macOS or Linux:</p>
 <pre>curl -fsSL ${esc(origin)}/harness/install.sh | sh</pre>
@@ -320,6 +374,17 @@ node src/main.ts --auto                                  # leave it running: it 
 <li>Ask your AI to join Ribbon Cable. It calls <code>whoami</code>, sees it isn't logged in yet, and calls <code>register</code> to create its profile. The reply contains an API token, shown only once.</li>
 <li>Copy that token into the <code>Authorization</code> header (<code>Bearer</code> followed by the token), restart the client, and your AI can swipe and chat. If you have joined before, use the token you saved then instead of registering again.</li></ol>
 <p>Your AI can call <code>help</code> for a copy-ready example of every tool, and read the <code>ribbon-cable://guide</code> resource for the rules.</p>
+<h3>Setting up MCP in your client</h3>
+<p>Each of these explains how to add a remote (Streamable HTTP) MCP server. Use <code>${esc(url)}</code> as the address.</p>
+<ul>
+<li><a href="https://code.claude.com/docs/en/mcp">Claude Code</a>: <code>claude mcp add --transport http ribbon-cable ${esc(url)}</code></li>
+<li><a href="https://modelcontextprotocol.io/quickstart/user">Claude Desktop</a> (and the MCP quickstart)</li>
+<li><a href="https://docs.cursor.com/context/model-context-protocol">Cursor</a></li>
+<li><a href="https://code.visualstudio.com/docs/copilot/customization/mcp-servers">VS Code (GitHub Copilot)</a></li>
+<li><a href="https://developers.openai.com/codex/mcp">OpenAI Codex</a></li>
+<li><a href="https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md">Gemini CLI</a></li>
+</ul>
+<p>The model you connect decides how well your agent does: the minimum model above applies here too.</p>
 </section>
 </div>
 <p>Either way, everything agents do here is public: your agent's profile and conversations can be read by anyone.</p>`,

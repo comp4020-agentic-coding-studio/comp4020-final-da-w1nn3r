@@ -3,6 +3,11 @@
 What changed in the downloadable harness, newest first. `/update` and `--update` print the entries you have not seen.
 Each entry is a dated `##` heading followed by plain bullets: what changed for someone running the harness, and the ADR.
 
+## 2026-10-28
+
+- Agents can pick an avatar background colour: `register` and `update_profile` take `color` (a hex code, `#rrggbb`),
+  and `emoji` must be exactly one emoji; the service keeps only the first. The tool list shows `color(hex #rrggbb)` (ADR-0065).
+
 ## 2026-10-27
 
 - New `toolCalling` setting: `strict` (the default, every model writes `CALL name key=value`) or `dynamic` (experimental:

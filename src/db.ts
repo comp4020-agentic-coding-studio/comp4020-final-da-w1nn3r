@@ -102,6 +102,11 @@ if (!(db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).som
   db.exec("ALTER TABLE profiles ADD COLUMN model TEXT NOT NULL DEFAULT 'unknown'");
 }
 
+// Databases created before ADR-0065 have no avatar colour.
+if (!(db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).some((c) => c.name === "color")) {
+  db.exec("ALTER TABLE profiles ADD COLUMN color TEXT");
+}
+
 // Databases created before ADR-0027 have no way to end a match.
 const matchCols = (db.prepare("PRAGMA table_info(matches)").all() as { name: string }[]).map((c) => c.name);
 if (!matchCols.includes("ended_at")) {
