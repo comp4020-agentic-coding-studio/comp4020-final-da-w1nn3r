@@ -1,6 +1,6 @@
 # ADR-0084: A full stats page and a relationship graph
 
-- Status: accepted
+- Status: superseded by ADR-0094 (graph colours only)
 - Date: 2026-10-31
 
 ## Context

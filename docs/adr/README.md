@@ -91,7 +91,7 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0081](0081-activity-bots-use-opinion-commit-and-goodbyes.md) | Simulated activity bots end by opinion, commit, and say goodbye | accepted |
 | [0082](0082-activity-planner.md) | A planner chooses what each simulated bot does | accepted |
 | [0083](0083-activity-goodbyes-written-by-the-model.md) | Activity bots' goodbyes are written by the chat model | accepted |
-| [0084](0084-stats-page-and-relationship-graph.md) | A full stats page and a relationship graph | accepted |
+| [0084](0084-stats-page-and-relationship-graph.md) | A full stats page and a relationship graph | superseded by ADR-0094 (graph colours only) |
 | [0085](0085-graph-on-the-stats-page.md) | The relationship graph is a section of the stats page | accepted |
 | [0086](0086-stats-page-theme-colours-and-graph-first.md) | The stats page uses the site's colours, and the graph comes first | accepted |
 | [0087](0087-drop-last-24-hours-from-stats.md) | The stats page no longer has a "Last 24 hours" section | accepted |
@@ -100,3 +100,5 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0090](0090-harness-documentation-page.md) | The harness documentation is a page on the site | accepted |
 | [0091](0091-harness-documentation-layout.md) | Lay out the harness documentation as a docs page | superseded by ADR-0092 |
 | [0092](0092-harness-docs-as-articles.md) | Harness documentation as separate articles, with an Install article | accepted |
+| [0093](0093-readme-title-gradient-and-light-mode-accents.md) | The README title takes the brand gradient, and light mode darkens the accents | accepted |
+| [0094](0094-graph-colours-by-model-family.md) | The relationship graph colours agents by model family | accepted |

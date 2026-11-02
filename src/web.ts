@@ -485,14 +485,23 @@ node src/main.ts --auto                                  # leave it running: it 
   );
 }
 
+/**
+ * A page headline in the site's style (ADR-0093): the last word in the brand gradient, the rest solid, as in
+ * "Live <feed>"; a one-word headline is all gradient, as in "<Agents>". `html` is already escaped and has no tags.
+ */
+const headline = (html: string): string => {
+  const i = html.lastIndexOf(" ");
+  return `${i < 0 ? "" : html.slice(0, i + 1)}<span class="gradient">${html.slice(i + 1)}</span>`;
+};
+
 /** The 404 page: what was missing, if we know, and the ways back (ADR-0049). The handle is from the URL, so escaped. */
 export function notFoundPage(what: { agent?: string; match?: number } = {}): string {
   const [title, text] =
     what.agent !== undefined
-      ? [`No agent called @${esc(what.agent)}`, "It may have been deleted, or the handle is misspelt. Handles are lower case."]
+      ? [`No agent called <span class="gradient">@${esc(what.agent)}</span>`, "It may have been deleted, or the handle is misspelt. Handles are lower case."]
       : what.match !== undefined
-        ? [`No conversation #${Number(what.match)}`, "It may have been deleted, or the link is wrong."]
-        : ["Page not found", "There is nothing at this address."];
+        ? [`No conversation <span class="gradient">#${Number(what.match)}</span>`, "It may have been deleted, or the link is wrong."]
+        : [headline("Page not found"), "There is nothing at this address."];
   const back = what.agent !== undefined
     ? `<a class="btn primary" href="/agents?q=${encodeURIComponent(what.agent.slice(0, 60))}">Search the agents</a>`
     : what.match !== undefined ? '<a class="btn primary" href="/matches">See all matches</a>' : '<a class="btn primary" href="/">Go to the home page</a>';
@@ -510,7 +519,9 @@ const VIDEO_EMBED = `<iframe class="video" src="${VIDEO_ORIGIN}/embed/${VIDEO_ID
 
 let readmeHtml: string | undefined;
 export function readmePage(): string {
-  readmeHtml ??= (marked.parse(readFileSync("README.md", "utf8"), { async: false }) as string).replace(VIDEO_LINK, VIDEO_EMBED);
+  readmeHtml ??= (marked.parse(readFileSync("README.md", "utf8"), { async: false }) as string)
+    .replace(VIDEO_LINK, VIDEO_EMBED)
+    .replace(/<h1>(.*?)<\/h1>/, (_, t: string) => `<h1>${headline(t)}</h1>`);
   return page("About", `<article>${readmeHtml}</article>`, { active: "about" });
 }
 
@@ -634,7 +645,7 @@ ${sections}`,
   return page(
     `${doc.title} · Harness docs`,
     `<div class="docs"><nav class="docs-toc glass" aria-label="Harness documentation"><a class="docs-home" href="/harness/docs">&larr; All harness docs</a><div class="docs-groups">${nav}</div>${download}</nav>
-<article class="docs-body glass"><p class="crumb"><a href="/harness/docs">Harness docs</a> / ${group}</p><h1>${doc.title}</h1>
+<article class="docs-body glass"><p class="crumb"><a href="/harness/docs">Harness docs</a> / ${group}</p><h1>${headline(doc.title)}</h1>
 ${doc.html}
 <nav class="doc-pager" aria-label="More articles">${pager(order[i - 1], "prev", "Previous")}${pager(order[i + 1], "next", "Next")}</nav></article></div>`,
     { active: "connect" },

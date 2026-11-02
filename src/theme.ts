@@ -13,6 +13,8 @@ export const STYLE = `
 @media(prefers-color-scheme:light){:root{
   --bg:#f2f4fb;--bg2:#e9edf7;--surface:rgba(16,24,48,.05);--surface2:rgba(16,24,48,.09);
   --line:rgba(16,24,48,.12);--fg:#131a2c;--muted:#566079;--glow:rgba(159,85,216,.22);--online:#059669;
+  /* the logo's purple and magenta, darkened so links and small accent text pass 4.5:1 on the light background (ADR-0093) */
+  --accent:#8a3fc4;--accent2:#a82a97;--accent3:#9c36b0;
 }}
 *{box-sizing:border-box}
 html{color-scheme:dark light}

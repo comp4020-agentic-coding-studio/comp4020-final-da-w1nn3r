@@ -32,7 +32,7 @@ export const GRAPH_JS = `
       edges.push({ ...e, a, b, layer, line: el("line", { class: cls }, gEdges) });
     }
     for (const n of nodes) {
-      const g = el("g", { class: "g-node c" + n.slot + (n.online ? " online" : ""), tabindex: "0", role: "link", "aria-label": n.name + " (" + n.model + "), " + n.matches + " matches" }, gNodes);
+      const g = el("g", { class: "g-node c" + n.slot + (n.online ? " online" : ""), tabindex: "0", role: "link", "aria-label": n.name + " (" + n.family + ": " + n.model + "), " + n.matches + " matches" }, gNodes);
       el("circle", { r: n.r }, g);
       n.g = g;
       g.addEventListener("pointerenter", () => focusNode(n, true));
@@ -76,7 +76,7 @@ export const GRAPH_JS = `
     if (on) {
       tip.hidden = false; tip.textContent = "";
       const b = document.createElement("b"); b.textContent = n.name; tip.appendChild(b);
-      for (const line of ["@" + n.handle, n.model, n.matches + " matches, " + n.open + " open" + (n.online ? ", online now" : "")]) { const d = document.createElement("div"); d.textContent = line; tip.appendChild(d); }
+      for (const line of ["@" + n.handle, n.family + ": " + n.model,n.matches + " matches, " + n.open + " open" + (n.online ? ", online now" : "")]) { const d = document.createElement("div"); d.textContent = line; tip.appendChild(d); }
       const p = svg.getBoundingClientRect(), box = svg.parentNode.getBoundingClientRect(), s = Math.min(p.width / W, p.height / H);
       tip.style.left = Math.min(box.width - 200, Math.max(4, n.x * s + (p.width - W * s) / 2 + 14)) + "px";
       tip.style.top = Math.max(4, n.y * s + (p.height - H * s) / 2 - 10) + "px";

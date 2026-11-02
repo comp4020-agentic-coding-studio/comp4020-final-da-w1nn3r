@@ -241,18 +241,20 @@ describe("website polish (ADR-0049)", () => {
     const res = await get("/agents/nobody_here_xyz");
     expect(res.status).toBe(404);
     const html = await res.text();
-    expect(html).toContain("No agent called @nobody_here_xyz");
+    // Headlines put their last word in a gradient span (ADR-0093), so compare the text without tags.
+    const text = (h: string): string => h.replace(/<[^>]+>/g, "");
+    expect(text(html)).toContain("No agent called @nobody_here_xyz");
     expect(html).toContain('href="/agents?q=nobody_here_xyz"');
     const evil = await (await get(`/agents/${encodeURIComponent("<b>x</b>")}`)).text();
-    expect(evil).toContain("No agent called @&lt;b&gt;x&lt;/b&gt;");
+    expect(text(evil)).toContain("No agent called @&lt;b&gt;x&lt;/b&gt;");
     expect(evil).not.toContain("<b>x</b>");
     const match = await get("/matches/99999999");
     expect(match.status).toBe(404);
-    expect(await match.text()).toContain("No conversation #99999999");
+    expect(text(await match.text())).toContain("No conversation #99999999");
     const other = await get("/no/such/page");
     expect(other.status).toBe(404);
     const body = await other.text();
-    expect(body).toContain("Page not found");
+    expect(text(body)).toContain("Page not found");
     expect(body).toContain('href="/"');
   });
 
@@ -399,7 +401,7 @@ describe("model filters, match header, replay and connect page (ADR-0051, ADR-00
 
     const settings = await (await get("/harness/docs/settings")).text();
     expect(settings.match(/<h1[ >]/g)).toHaveLength(1);
-    expect(settings).toContain("<h1>Settings</h1>");
+    expect(settings).toContain('<h1><span class="gradient">Settings</span></h1>');
     expect(settings).toContain('aria-current="page">Settings</a>');
     expect(settings).not.toContain("HARNESS_DEBUG"); // that is the next article's
     expect(await (await get("/harness/docs/version-history")).text()).toMatch(/<h2 id="\d{4}-\d\d-\d\d">/);
@@ -663,6 +665,18 @@ describe("stats page and relationship graph (ADR-0084)", () => {
     expect(g.edges.some((e: any) => e.kind === "like" && e.a === a.handle && e.b === c.handle)).toBe(true);
     expect(raw).not.toContain("opinion");
     expect(raw).not.toContain(a.token);
+    // Colours and the legend go by model family, not the exact name (ADR-0094).
+    const d = await newAgent("grd", { model: "gemma-4-26B-A4B-it-UD-IQ4_XS" });
+    const e = await newAgent("gre", { model: "Gemma4-26B-A4B-Balanced-IQ4_XS" });
+    const g2 = await (await get("/graph.json")).json();
+    const [nd, ne] = [d, e].map((x) => g2.nodes.find((n: any) => n.handle === x.handle));
+    expect(nd?.family).toBe("Gemma");
+    expect(ne?.slot).toBe(nd?.slot);
+    expect(g2.families).toContainEqual(expect.objectContaining({ family: "Gemma", models: expect.arrayContaining(["gemma-4-26B-A4B-it-UD-IQ4_XS", "Gemma4-26B-A4B-Balanced-IQ4_XS"]) }));
+    // A name that is no known family is Unidentified, in the grey last slot, not a family of its own.
+    const nc = g2.nodes.find((n: any) => n.handle === c.handle);
+    expect(nc?.family).toBe("Unidentified");
+    expect(nc?.slot).toBe(7);
 
     const stats = await (await get("/stats")).text();
     expect(stats).toContain("Committed");

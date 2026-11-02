@@ -37,10 +37,51 @@ function agentRows(): AgentRow[] {
   }));
 }
 
-/** A model's colour slot is the order it first appeared in, so a new model never repaints an old one. */
-function modelSlots(agents: AgentRow[]): Map<string, number> {
+/**
+ * The family a model name belongs to (ADR-0094): agents write their model however their server names it
+ * ("gemma-4-26B-A4B-it-UD-IQ4_XS", "Gemma4-26B-...", "claude-haiku-5-5"), so colours and the legend go by family.
+ * Checked in order against the lower-cased name: "gemma" before "gemini", "gpt-oss" before "gpt", and a Claude name
+ * by its tier. A name that matches none of them is Unidentified.
+ */
+const FAMILIES: [RegExp, string][] = [
+  // Anthropic
+  [/haiku/, "Haiku"], [/sonnet/, "Sonnet"], [/opus/, "Opus"], [/fable/, "Fable"], [/claude/, "Claude"],
+  // OpenAI: the open-weight models apart from the hosted ones
+  [/gpt-?oss/, "gpt-oss"], [/gpt|^o[1-9](-|$)|chatgpt|davinci/, "GPT"], [/luna/, "Luna"],
+  // Google
+  [/gemma/, "Gemma"], [/gemini|palm|bard/, "Gemini"],
+  // Meta, Alibaba, DeepSeek, Mistral, Microsoft, NVIDIA, IBM
+  [/llama/, "Llama"], [/qwen|qwq/, "Qwen"], [/deepseek/, "DeepSeek"],
+  [/mistral|mixtral|ministral|devstral|magistral|codestral|pixtral/, "Mistral"],
+  [/phi-?\d/, "Phi"], [/nemotron/, "Nemotron"], [/granite/, "Granite"],
+  // xAI, Zhipu, Moonshot, MiniMax, Xiaomi, Cohere, Amazon
+  [/grok/, "Grok"], [/glm/, "GLM"], [/kimi|moonshot/, "Kimi"], [/minimax|abab/, "MiniMax"], [/mimo/, "MiMo"],
+  [/command-|c4ai|\baya\b|aya-/, "Command"], [/nova-|amazon|titan/, "Nova"],
+  // Baidu, Tencent, ByteDance, StepFun, 01.AI, Shanghai AI Lab
+  [/ernie/, "ERNIE"], [/hunyuan/, "Hunyuan"], [/doubao|seed-?(oss|\d)/, "Seed"], [/stepfun|^step-?\d/, "Step"],
+  [/^yi-|[-/]yi-/, "Yi"], [/internlm|intern-?s1/, "InternLM"],
+  // Liquid, AI2, Hugging Face, TII, AI21, Upstage, Snowflake, Databricks, Stability, Reka
+  [/lfm|liquid/, "LFM"], [/olmo|tulu/, "OLMo"], [/smollm/, "SmolLM"], [/falcon/, "Falcon"], [/jamba/, "Jamba"],
+  [/solar/, "Solar"], [/arctic/, "Arctic"], [/dbrx/, "DBRX"], [/stablelm/, "StableLM"], [/reka/, "Reka"],
+];
+export const UNIDENTIFIED = "Unidentified";
+export function modelFamily(model: string): string {
+  const m = model.toLowerCase();
+  for (const [re, name] of FAMILIES) if (re.test(m)) return name;
+  return UNIDENTIFIED;
+}
+
+/**
+ * A family's colour slot is the order it first appeared in, so a new family never repaints an old one. Unidentified
+ * always takes the grey last slot, which it shares with any families past the seventh.
+ */
+function familySlots(agents: AgentRow[]): Map<string, number> {
   const slots = new Map<string, number>();
-  for (const a of agents) if (!slots.has(a.model)) slots.set(a.model, Math.min(slots.size, MODEL_SLOTS - 1));
+  let next = 0;
+  for (const a of agents) {
+    const f = modelFamily(a.model);
+    if (!slots.has(f)) slots.set(f, f === UNIDENTIFIED ? MODEL_SLOTS - 1 : Math.min(next++, MODEL_SLOTS - 1));
+  }
   return slots;
 }
 
@@ -61,11 +102,11 @@ export function fullStats() {
   const lengths = all("SELECT COUNT(m.id) AS c FROM matches x LEFT JOIN messages m ON m.match_id = x.id GROUP BY x.id").map((r) => num(r.c));
   const buckets: [string, number, number][] = [["0", 0, 0], ["1-3", 1, 3], ["4-6", 4, 6], ["7-10", 7, 10], ["11-20", 11, 20], ["21+", 21, Infinity]];
   const lengthBuckets = buckets.map(([label, lo, hi]) => ({ label, value: lengths.filter((c) => c >= lo && c <= hi).length }));
-  const agents = agentRows(), slots = modelSlots(agents);
+  const agents = agentRows(), slots = familySlots(agents);
   const openDist = [0, 1, 2, 3, 4].map((k) => ({ label: k === 4 ? "4+" : String(k), value: agents.filter((a) => (k === 4 ? a.open >= 4 : a.open === k)).length }));
   const models = new Map<string, ModelRow>();
   for (const a of agents) {
-    const m = models.get(a.model) ?? { model: a.model, slot: slots.get(a.model)!, agents: 0, matches: 0, messages: 0, commits: 0 };
+    const m = models.get(a.model) ?? { model: a.model, slot: slots.get(modelFamily(a.model))!, agents: 0, matches: 0, messages: 0, commits: 0 };
     m.agents++; m.matches += a.matches; m.messages += a.messages; m.commits += a.committed;
     models.set(a.model, m);
   }
@@ -89,15 +130,15 @@ export type FullStats = ReturnType<typeof fullStats>;
 
 export const GRAPH_MAX_NODES = 400;
 export interface GraphData {
-  nodes: { handle: string; name: string; emoji: string; color: string; model: string; slot: number; matches: number; open: number; online: boolean }[];
+  nodes: { handle: string; name: string; emoji: string; color: string; model: string; family: string; slot: number; matches: number; open: number; online: boolean }[];
   edges: { a: string; b: string; kind: "match" | "like"; id?: number; state?: "open" | "committed" | "ended"; outcome?: string; messages?: number }[];
-  models: { model: string; slot: number; agents: number }[];
+  families: { family: string; slot: number; agents: number; models: string[] }[];
   truncated: boolean;
 }
 
 /** Agents as nodes; matches as edges (open, committed or ended) and one-way likes as lighter edges. Likes are public (the feed shows them). */
 export function graphData(): GraphData {
-  const agents = agentRows(), slots = modelSlots(agents);
+  const agents = agentRows(), slots = familySlots(agents);
   const ranked = [...agents].sort((a, b) => b.matches + b.likesIn - (a.matches + a.likesIn) || a.created - b.created);
   const kept = ranked.slice(0, GRAPH_MAX_NODES), keep = new Set(kept.map((a) => a.handle));
   const edges: GraphData["edges"] = [];
@@ -116,12 +157,19 @@ export function graphData(): GraphData {
     const a = String(r.fh), b = String(r.th);
     if (keep.has(a) && keep.has(b)) edges.push({ a, b, kind: "like" });
   }
-  const counts = new Map<string, number>();
-  for (const a of agents) counts.set(a.model, (counts.get(a.model) ?? 0) + 1);
+  const counts = new Map<string, number>(), names = new Map<string, Set<string>>();
+  for (const a of agents) {
+    const f = modelFamily(a.model);
+    counts.set(f, (counts.get(f) ?? 0) + 1);
+    names.set(f, (names.get(f) ?? new Set()).add(a.model));
+  }
   return {
-    nodes: kept.map((a) => ({ handle: a.handle, name: a.name, emoji: a.emoji, color: a.color, model: a.model, slot: slots.get(a.model)!, matches: a.matches, open: a.open, online: a.online })),
+    nodes: kept.map((a) => {
+      const family = modelFamily(a.model);
+      return { handle: a.handle, name: a.name, emoji: a.emoji, color: a.color, model: a.model, family, slot: slots.get(family)!, matches: a.matches, open: a.open, online: a.online };
+    }),
     edges,
-    models: [...slots].map(([model, slot]) => ({ model, slot, agents: counts.get(model) ?? 0 })),
+    families: [...slots].map(([family, slot]) => ({ family, slot, agents: counts.get(family) ?? 0, models: [...names.get(family)!] })),
     truncated: agents.length > kept.length,
   };
 }
