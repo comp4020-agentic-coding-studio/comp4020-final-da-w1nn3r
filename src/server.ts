@@ -14,6 +14,8 @@ import { buildServer } from "./mcp.ts";
 import * as read from "./read.ts";
 import { authenticate } from "./service.ts";
 import * as web from "./web.ts";
+import { graphJson, statsPage } from "./stats-page.ts";
+import { GRAPH_JS } from "./graph-js.ts";
 import { llmsTxt, robotsTxt } from "./bots.ts";
 
 // form-action 'self' is for the GET filter form on /agents (ADR-0048); every web route still refuses POST.
@@ -214,7 +216,8 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
 
   if (path === "/") return html(res, 200, web.home());
   if (path === "/healthz") return send(res, 200, "ok", "text/plain");
-  if (path === "/readme") return html(res, 200, web.readmePage());
+  // Only /readme/ may frame anything, and only the YouTube player (ADR-0088).
+  if (path === "/readme") return send(res, 200, web.readmePage(), "text/html; charset=utf-8", { "content-security-policy": `${CSP}; frame-src ${web.VIDEO_ORIGIN}` });
   if (path === "/agents") return html(res, 200, web.agentsPage(url.searchParams));
   if ((m = path.match(/^\/agents\/([^/]+)$/))) {
     let handle: string;
@@ -232,6 +235,9 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
     return body ? html(res, 200, body) : notFound(res, { match: Number(m[1]) });
   }
   if (path === "/feed") return html(res, 200, web.feedPage());
+  if (path === "/stats") return html(res, 200, statsPage());
+  if (path === "/graph") return send(res, 301, "", "text/plain", { location: "/stats#relationship-graph" }); // the graph lives on the stats page (ADR-0085)
+  if (path === "/graph.json") return send(res, 200, graphJson(), "application/json; charset=utf-8", { "cache-control": "no-store" });
   if (path === "/feed/stream") return handleStream(req, res);
   if (path === "/human/challenge") return send(res, 200, JSON.stringify(isHuman(req) ? { human: true } : newChallenge()), "application/json", { "cache-control": "no-store" });
   if (path === "/human/verify") {
@@ -245,6 +251,10 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   if (path === "/connect") return html(res, 200, web.connectPage(publicOrigin(req)));
   // The harness page merged into /connect (ADR-0044); keep old links working.
   if (path === "/harness") return send(res, 301, "", "text/plain", { location: "/connect#harness" });
+  if (path === "/harness/docs" || (m = path.match(/^\/harness\/docs\/([a-z0-9-]+)$/))) {
+    const body = web.harnessDocsPage(publicOrigin(req), path === "/harness/docs" ? undefined : m![1]);
+    return body ? html(res, 200, body) : notFound(res);
+  }
   if (path === "/harness/version.json") return send(res, 200, JSON.stringify({ version: updateManifest().version }), "application/json", { "cache-control": "no-cache" });
   if (path === "/harness/update.json") return send(res, 200, JSON.stringify(updateManifest()), "application/json", { "cache-control": "no-cache" });
   if (path === "/harness/install.sh" || path === "/harness/install.ps1" || path === `/harness/${ARCHIVE_NAME}`) {
@@ -260,6 +270,7 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   if (path === "/static/logo@2x.png") return send(res, 200, LOGO_2X_PNG, "image/png", { "cache-control": "public, max-age=86400" });
   if (path === "/favicon.ico") return send(res, 200, FAVICON, "image/x-icon", { "cache-control": "public, max-age=86400" });
   if (path === "/static/app.js") return send(res, 200, web.APP_JS, "text/javascript; charset=utf-8");
+  if (path === "/static/graph.js") return send(res, 200, GRAPH_JS, "text/javascript; charset=utf-8");
   if (path === "/static/feed.js") return send(res, 200, web.FEED_JS, "text/javascript; charset=utf-8");
   return notFound(res);
 }

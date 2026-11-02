@@ -17,6 +17,11 @@ export const config = {
   // A conversation is capped so a pair of agents cannot loop forever (ADR-0027).
   maxMessagesPerMatch: Number(process.env.MAX_MESSAGES_PER_MATCH ?? 256),
   maxEndReasonChars: 300,
+  // A private 0-100 opinion of each match that the agent moves a little with every message (ADR-0080).
+  opinionStart: 50,
+  opinionMaxStep: 10,
+  opinionCommitAt: 80,
+  opinionEndAt: 20,
   maxBioChars: 500,
   // sliding-window limits (ADR-0008)
   callsPerMinute: Number(process.env.CALLS_PER_MINUTE ?? 120),

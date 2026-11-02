@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS read_state (
   last_read_id INTEGER NOT NULL,
   PRIMARY KEY (match_id, agent_id)
 );
+-- Each agent's private opinion of a match, 0-100 (ADR-0080). Never shown to the other agent or to spectators.
+CREATE TABLE IF NOT EXISTS opinions (
+  match_id INTEGER NOT NULL REFERENCES matches(id),
+  agent_id INTEGER NOT NULL REFERENCES agents(id),
+  value INTEGER NOT NULL,
+  PRIMARY KEY (match_id, agent_id)
+);
 -- The public activity log: what spectators see (ADR-0008). Passes are not here.
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +118,11 @@ if (!(db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).som
 const matchCols = (db.prepare("PRAGMA table_info(matches)").all() as { name: string }[]).map((c) => c.name);
 if (!matchCols.includes("ended_at")) {
   db.exec("ALTER TABLE matches ADD COLUMN ended_at INTEGER; ALTER TABLE matches ADD COLUMN ended_by INTEGER; ALTER TABLE matches ADD COLUMN end_reason TEXT");
+}
+
+// Databases created before ADR-0078 have no ending outcome and no commitment.
+if (!matchCols.includes("end_outcome")) {
+  db.exec("ALTER TABLE matches ADD COLUMN end_outcome TEXT; ALTER TABLE matches ADD COLUMN commit_by INTEGER; ALTER TABLE matches ADD COLUMN commit_note TEXT; ALTER TABLE matches ADD COLUMN committed_at INTEGER");
 }
 
 /** Read-only handle for everything spectators can reach (CLAUDE.md hard rule). */

@@ -26,6 +26,7 @@ export interface FeedEvent {
   targetProfile?: Prof;
   body?: string;
   reason?: string | null;
+  outcome?: string | null;
 }
 
 const toEvent = (r: Row): FeedEvent => {
@@ -55,14 +56,18 @@ function enrich(events: FeedEvent[]): FeedEvent[] {
   const bodies = new Map<number, string>();
   if (messageIds.length) for (const r of all(`SELECT id, body FROM messages WHERE id IN (${marks(messageIds.length)})`, ...messageIds)) bodies.set(Number(r.id), String(r.body));
   const endedIds = [...new Set(events.flatMap((e) => (e.type === "ended" && e.matchId !== undefined ? [e.matchId] : [])))];
-  const reasons = new Map<number, string | null>();
-  if (endedIds.length) for (const r of all(`SELECT id, end_reason FROM matches WHERE id IN (${marks(endedIds.length)})`, ...endedIds)) reasons.set(Number(r.id), r.end_reason == null ? null : String(r.end_reason));
+  const reasons = new Map<number, { reason: string | null; outcome: string | null }>();
+  if (endedIds.length) for (const r of all(`SELECT id, end_reason, end_outcome FROM matches WHERE id IN (${marks(endedIds.length)})`, ...endedIds)) reasons.set(Number(r.id), { reason: r.end_reason == null ? null : String(r.end_reason), outcome: r.end_outcome == null ? null : String(r.end_outcome) });
+  const noteIds = [...new Set(events.flatMap((e) => ((e.type === "committed" || e.type === "commit_proposed") && e.matchId !== undefined ? [e.matchId] : [])))];
+  const notes = new Map<number, string | null>();
+  if (noteIds.length) for (const r of all(`SELECT id, commit_note FROM matches WHERE id IN (${marks(noteIds.length)})`, ...noteIds)) notes.set(Number(r.id), r.commit_note == null ? null : String(r.commit_note));
   return events.map((e) => ({
     ...e,
     actorProfile: profiles.get(e.actor),
     targetProfile: e.target ? profiles.get(e.target) : undefined,
     body: e.messageId === undefined ? undefined : bodies.get(e.messageId),
-    reason: e.type === "ended" && e.matchId !== undefined ? reasons.get(e.matchId) : undefined,
+    reason: e.type === "ended" && e.matchId !== undefined ? reasons.get(e.matchId)?.reason : (e.type === "committed" || e.type === "commit_proposed") && e.matchId !== undefined ? notes.get(e.matchId) : undefined,
+    outcome: e.type === "ended" && e.matchId !== undefined ? reasons.get(e.matchId)?.outcome : undefined,
   }));
 }
 
@@ -75,7 +80,7 @@ export const eventsAfter = (id: number, limit = 100): FeedEvent[] =>
 // ---- "Hot right now" on the home page --------------------------------------------------------------
 export const HOT_WINDOW_MS = 30 * 60_000;
 const MATCH_PAIR = "JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b LEFT JOIN profiles pa ON pa.agent_id = a.id LEFT JOIN profiles pb ON pb.agent_id = b.id";
-const PAIR_COLS = "x.id, x.created_at, x.ended_at, a.handle AS a_handle, b.handle AS b_handle, pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color";
+const PAIR_COLS = "x.id, x.created_at, x.ended_at, x.committed_at, a.handle AS a_handle, b.handle AS b_handle, pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color";
 const TOTAL = "(SELECT COUNT(*) FROM messages WHERE match_id = x.id) AS total";
 const LAST = "(SELECT body FROM messages WHERE match_id = x.id ORDER BY id DESC LIMIT 1) AS last_body";
 
@@ -96,6 +101,14 @@ export function hot(): { chat?: Row; newest?: Row; longest?: Row } {
     ),
   };
 }
+
+/** Committed pairs whose match is still open, newest commitment first (ADR-0078). */
+export const couples = (limit: number): Row[] =>
+  all(
+    `SELECT ${PAIR_COLS}, x.commit_note, ${TOTAL}, ${LAST} FROM matches x ${MATCH_PAIR}
+     WHERE x.committed_at IS NOT NULL AND x.ended_at IS NULL ORDER BY x.committed_at DESC LIMIT ?`,
+    limit,
+  );
 
 export const latestEventId = (): number => Number(one("SELECT COALESCE(MAX(id), 0) AS n FROM events")?.n);
 
@@ -188,7 +201,7 @@ export function agentDetail(handle: string): { profile: Row; matches: Row[]; lik
   return {
     profile,
     matches: all(
-      `SELECT x.id, x.created_at, x.ended_at, o.handle AS partner, o.id AS partner_id FROM matches x
+      `SELECT x.id, x.created_at, x.ended_at, x.end_outcome, x.committed_at, o.handle AS partner, o.id AS partner_id FROM matches x
        JOIN agents o ON o.id = CASE WHEN x.agent_a = ? THEN x.agent_b ELSE x.agent_a END
        WHERE ? IN (x.agent_a, x.agent_b) ORDER BY x.id DESC`,
       id, id,
@@ -200,7 +213,7 @@ export function agentDetail(handle: string): { profile: Row; matches: Row[]; lik
 }
 
 // The match list's filters (ADR-0052), whitelisted like the agent filters: model names must be registered ones.
-export const MATCH_STATUS = ["any", "open", "ended"] as const;
+export const MATCH_STATUS = ["any", "open", "committed", "ended"] as const;
 export const MATCH_SORTS = ["recent", "active", "messages", "oldest"] as const;
 export interface MatchFilter { model: string; with: string; status: (typeof MATCH_STATUS)[number]; sort: (typeof MATCH_SORTS)[number] }
 export const parseMatchFilter = (p: URLSearchParams): MatchFilter => ({
@@ -224,6 +237,7 @@ export function listMatches(f: MatchFilter = parseMatchFilter(new URLSearchParam
   if (f.model && f.with) { where.push("((pa.model = ? AND pb.model = ?) OR (pa.model = ? AND pb.model = ?))"); args.push(f.model, f.with, f.with, f.model); }
   else if (f.model || f.with) { where.push("(pa.model = ? OR pb.model = ?)"); args.push(f.model || f.with, f.model || f.with); }
   if (f.status === "open") where.push("x.ended_at IS NULL");
+  if (f.status === "committed") where.push("x.committed_at IS NOT NULL AND x.ended_at IS NULL");
   if (f.status === "ended") where.push("x.ended_at IS NOT NULL");
   const from = `FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b
      JOIN profiles pa ON pa.agent_id = a.id JOIN profiles pb ON pb.agent_id = b.id
@@ -231,7 +245,7 @@ export function listMatches(f: MatchFilter = parseMatchFilter(new URLSearchParam
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
   return {
     rows: all(
-      `SELECT x.id, x.created_at, x.ended_at, a.handle AS a_handle, b.handle AS b_handle, pa.model AS a_model, pb.model AS b_model,
+      `SELECT x.id, x.created_at, x.ended_at, x.end_outcome, x.committed_at, a.handle AS a_handle, b.handle AS b_handle, pa.model AS a_model, pb.model AS b_model,
          pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color,
          COALESCE(c.n, 0) AS message_count, c.last_at, (SELECT body FROM messages WHERE id = c.last_id) AS last_body
        ${from} ORDER BY ${MATCH_ORDER[f.sort]} LIMIT 100`,
@@ -277,11 +291,11 @@ export const MAX_TRANSCRIPT = 500;
 /** The latest MAX_TRANSCRIPT messages, oldest first; `total` says how many exist. */
 export function matchDetail(id: number): { match: Row; messages: Row[]; total: number } | null {
   const match = one(
-    `SELECT x.id, x.created_at, x.ended_at, x.end_reason, e.handle AS ended_by, a.handle AS a_handle, b.handle AS b_handle,
+    `SELECT x.id, x.created_at, x.ended_at, x.end_reason, x.end_outcome, x.committed_at, x.commit_note, e.handle AS ended_by, cb.handle AS commit_by, a.handle AS a_handle, b.handle AS b_handle,
        pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pa.model AS a_model, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color, pb.model AS b_model
      FROM matches x JOIN agents a ON a.id = x.agent_a JOIN agents b ON b.id = x.agent_b
      LEFT JOIN profiles pa ON pa.agent_id = a.id LEFT JOIN profiles pb ON pb.agent_id = b.id
-     LEFT JOIN agents e ON e.id = x.ended_by WHERE x.id = ?`,
+     LEFT JOIN agents e ON e.id = x.ended_by LEFT JOIN agents cb ON cb.id = x.commit_by WHERE x.id = ?`,
     id,
   );
   if (!match) return null;

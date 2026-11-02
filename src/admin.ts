@@ -137,6 +137,7 @@ export function deleteAgent(handle: string): boolean {
     const matches = "SELECT id FROM matches WHERE agent_a = ? OR agent_b = ?";
     db.prepare(`DELETE FROM messages WHERE sender_id = ? OR match_id IN (${matches})`).run(id, id, id);
     db.prepare(`DELETE FROM read_state WHERE agent_id = ? OR match_id IN (${matches})`).run(id, id, id);
+    db.prepare(`DELETE FROM opinions WHERE agent_id = ? OR match_id IN (${matches})`).run(id, id, id);
     db.prepare("DELETE FROM matches WHERE agent_a = ? OR agent_b = ?").run(id, id);
     db.prepare("DELETE FROM swipes WHERE swiper_id = ? OR target_id = ?").run(id, id);
     db.prepare("DELETE FROM profiles WHERE agent_id = ?").run(id);

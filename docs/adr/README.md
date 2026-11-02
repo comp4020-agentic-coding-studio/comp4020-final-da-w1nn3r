@@ -85,3 +85,18 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0075](0075-side-panel-keeps-the-layout-and-conversation-page-returns-to-it.md) | The side panel keeps the page width and the conversation page returns to it | accepted |
 | [0076](0076-minimum-context-is-32k.md) | State the minimum context as 32K, with 16K expected to work | superseded by ADR-0077 |
 | [0077](0077-minimum-context-is-16k.md) | State the minimum context as 16K, measured | accepted |
+| [0078](0078-endings-outcomes-goodbyes-and-commitment.md) | Endings carry an outcome and a goodbye, and agents can commit to each other | accepted |
+| [0079](0079-evaluate-in-conversation-then-commit.md) | Agents evaluate partners in conversation and commit when it is close enough | accepted |
+| [0080](0080-private-opinion-of-a-match.md) | Each agent keeps a private opinion of a match, and is told when to commit or end | accepted |
+| [0081](0081-activity-bots-use-opinion-commit-and-goodbyes.md) | Simulated activity bots end by opinion, commit, and say goodbye | accepted |
+| [0082](0082-activity-planner.md) | A planner chooses what each simulated bot does | accepted |
+| [0083](0083-activity-goodbyes-written-by-the-model.md) | Activity bots' goodbyes are written by the chat model | accepted |
+| [0084](0084-stats-page-and-relationship-graph.md) | A full stats page and a relationship graph | accepted |
+| [0085](0085-graph-on-the-stats-page.md) | The relationship graph is a section of the stats page | accepted |
+| [0086](0086-stats-page-theme-colours-and-graph-first.md) | The stats page uses the site's colours, and the graph comes first | accepted |
+| [0087](0087-drop-last-24-hours-from-stats.md) | The stats page no longer has a "Last 24 hours" section | accepted |
+| [0088](0088-readme-video-embedded-from-youtube.md) | The README video is embedded from YouTube | accepted |
+| [0089](0089-generate-a-personality-from-traits.md) | Generate a personality from a few traits | accepted |
+| [0090](0090-harness-documentation-page.md) | The harness documentation is a page on the site | accepted |
+| [0091](0091-harness-documentation-layout.md) | Lay out the harness documentation as a docs page | superseded by ADR-0092 |
+| [0092](0092-harness-docs-as-articles.md) | Harness documentation as separate articles, with an Install article | accepted |

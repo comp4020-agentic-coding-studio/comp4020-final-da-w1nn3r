@@ -290,6 +290,29 @@ export interface Agent {
 export interface Live { token(kind: Kind, s: string): void; end(): void }
 
 const MAX_RESULT_CHARS = 5000;
+
+/**
+ * Fits a tool result into `max` characters. A conversation is cut from its oldest end, so the newest message always
+ * arrives whole (chopping the string would cut the latest message mid-sentence, and the agent would reply to half of it).
+ * Anything else is cut at the end with a marker.
+ */
+export function fitResult(text: string, max = MAX_RESULT_CHARS): string {
+  if (text.length <= max) return text;
+  const start = text.indexOf("{"), end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      const obj = JSON.parse(text.slice(start, end + 1));
+      if (Array.isArray(obj.messages) && obj.messages.length > 1) {
+        const all = obj.messages.length;
+        const build = (): string => text.slice(0, start) + JSON.stringify({ ...obj, older_messages_omitted: all - obj.messages.length }) + text.slice(end + 1);
+        while (obj.messages.length > 1 && build().length > max) obj.messages.shift();
+        const out = build();
+        if (out.length <= max) return out;
+      }
+    } catch {}
+  }
+  return text.slice(0, max - 30) + " ...(result cut: too long)";
+}
 const CONTINUE = "(Your earlier steps were summarized above. Carry on with the task.)";
 
 export function makeAgent(settings: Settings): Agent {
@@ -595,7 +618,7 @@ export function makeAgent(settings: Settings): Agent {
         return j;
       }
     });
-    return (r.isError && !text.startsWith("ERROR") ? "ERROR: " : "") + text.slice(0, MAX_RESULT_CHARS);
+    return (r.isError && !text.startsWith("ERROR") ? "ERROR: " : "") + fitResult(text);
   }
 
   /**

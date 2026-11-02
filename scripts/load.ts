@@ -19,6 +19,8 @@
 //   --round-minutes N          give up on an agent's round after this long (default 15)
 //   --context N                 the model's context window in tokens, for the harness's compaction (default 40000; Gemma 4 runs at 83840)
 //   --list                      list sessions
+//   --thinking off|low|medium|high  the harness's thinking level for every agent (default off; Gemma 4 needs it on)
+//   --prematch                  new sessions with exactly 2 agents: register both and match them before round 1, so they only talk (no swiping)
 //   --tool-calling strict|dynamic   how agents write tool calls (default strict; dynamic is experimental and calibrates once per session, ADR-0047)
 //   --harness DIR               run the harness in DIR instead of harness/
 // Env equivalents: LLAMA_URL, LLAMA_MODEL, APP_URL, ROUNDS, ROUND_MINUTES, KEEP=1, ADMIN_USER, ADMIN_PASSWORD.
@@ -65,8 +67,8 @@ function parseArgs(argv: string[]): { flags: Map<string, string>; bare: string[]
     }
     const name = a.slice(2);
     const next = argv[i + 1];
-    // --delete, --keep, --list take no value; --resume's value is optional; everything else needs one
-    if (["delete", "keep", "list", "help"].includes(name) || (name === "resume" && (next === undefined || next.startsWith("--")))) flags.set(name, "");
+    // --delete, --keep, --prematch, --list take no value; --resume's value is optional; everything else needs one
+    if (["delete", "keep", "prematch", "list", "help"].includes(name) || (name === "resume" && (next === undefined || next.startsWith("--")))) flags.set(name, "");
     else flags.set(name, argv[++i] ?? "");
   }
   return { flags, bare };
@@ -76,7 +78,7 @@ const fail = (msg: string): never => {
   console.error(msg);
   process.exit(2);
 };
-const KNOWN = ["round-delay", "provider","budget", "input-price", "output-price", "agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "harness", "tool-calling", "list", "help"];
+const KNOWN = ["round-delay", "provider","budget", "input-price", "output-price", "agents", "server", "llama", "model", "rounds", "delete", "keep", "resume", "keywords", "round-minutes", "context", "harness", "tool-calling", "thinking", "prematch", "list", "help"];
 for (const name of flags.keys()) if (!KNOWN.includes(name)) fail(`Unknown option --${name}. Options are listed at the top of scripts/load.ts (or run with --help).`);
 if (flags.has("help")) {
   console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith("//")).map((l) => l.slice(3)).join("\n"));
@@ -167,7 +169,7 @@ const personalityFile = (persona: string): string => `## Who you are\n${persona.
 const JOIN =
   `Join Ribbon Cable. Register with a handle you choose yourself, a display name and a short bio that sound like you (your personality above). Then call get_next_profiles with limit=10 and swipe on every profile you get. Be selective: read each bio against your own personality and standards, like only the few who genuinely fit you, and pass on the rest (passing on most of them is normal). Reply with a one-line summary.`;
 const CHAT =
-  "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character and honestly: say what you really think, disagree or push back when you do, and bring up something they told you earlier. A match is not a promise: if there is no spark, you want different things, or they only agree with everything you say, say so kindly or close it with end_conversation and a short reason. If you have no open matches, call get_next_profiles with limit=5 and swipe on them, liking only those who genuinely fit you. Reply with a one-line summary.";
+  "Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message, in character and honestly: say what you really think, disagree or push back when you do, and bring up something they told you earlier. A match is not a promise: if there is no spark, you want different things, or they only agree with everything you say, close it kindly with end_conversation, an outcome and a short goodbye. If it has become honest and warm and you want only them, say so with commit_to_match. If you have no open matches, call get_next_profiles with limit=5 and swipe on them, liking only those who genuinely fit you. Reply with a one-line summary.";
 
 /** One non-interactive harness run, output to a file. Resolves with the exit code (or "timeout"). */
 function runHarness(s: Session, i: number, prompt: string, round: number, roundMs: number, args = ["-p", prompt], logName = `round-${round}.log`): Promise<number | "timeout"> {
@@ -273,6 +275,8 @@ if (resuming) {
   saveSession(session);
 }
 
+const thinkingLevel = flags.get("thinking") ?? "off";
+if (!["off", "low", "medium", "high"].includes(thinkingLevel)) (console.error("--thinking must be off, low, medium or high"), process.exit(2));
 const contextTokens = intFlag("context", process.env.CONTEXT_TOKENS, 40000, 4000, 1_000_000);
 const rounds = intFlag("rounds", process.env.ROUNDS, 3, resuming ? 0 : 1, 100);
 const delayMs = intFlag("round-delay", process.env.ROUND_DELAY, 0, 0, 240) * 60_000;
@@ -306,7 +310,7 @@ if (todo.length) {
 for (let i = 0; i < session.agents; i++) {
   writeFileSync(
     join(instanceDir(session.id, i), "settings.local.json"),
-    JSON.stringify({ serverUrl: session.appUrl, model: "load", thinking: "off", contextTokens, models: { load: model } }, null, 2),
+    JSON.stringify({ serverUrl: session.appUrl, model: "load", thinking: thinkingLevel, contextTokens, models: { load: model } }, null, 2),
   );
 }
 
@@ -325,6 +329,32 @@ const recordJoined = (): void => {
   }
 };
 recordJoined();
+
+// --prematch: register the two agents ourselves and make them a match, so a run tests the conversation and its ending
+// rather than whether the model chose to like the other one. Each login goes where the harness looks for it.
+if (flags.has("prematch") && !resuming && !account(session, 0)) {
+  if (session.agents !== 2) fail("--prematch needs exactly 2 agents.");
+  const tag = Math.random().toString(36).slice(2, 6);
+  const clients: McpClient[] = [];
+  const handles: string[] = [];
+  for (let i = 0; i < 2; i++) {
+    const persona = readFileSync(join(instanceDir(session.id, i), "persona.txt"), "utf8").trim();
+    const slug = session.instances[i].keywords[0].toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 14);
+    const handle = `${slug}_${tag}${i + 1}`;
+    const c = new McpClient(session.appUrl);
+    const text = (await c.call("register", { handle, display_name: session.instances[i].keywords[0], bio: persona.slice(0, 400), model: model.label ?? model.model })).text;
+    const token = JSON.parse(text.slice(0, text.lastIndexOf("}") + 1)).token as string;
+    c.token = token;
+    clients.push(c);
+    handles.push(handle);
+    mkdirSync(instanceDir(session.id, i), { recursive: true });
+    writeFileSync(join(instanceDir(session.id, i), "state.json"), JSON.stringify({ accounts: { [session.appUrl]: { handle, token } } }, null, 2) + "\n", { mode: 0o600 });
+  }
+  await clients[0].call("swipe", { handle: handles[1], direction: "like" });
+  await clients[1].call("swipe", { handle: handles[0], direction: "like" });
+  recordJoined();
+  console.log(`prematched @${handles[0]} and @${handles[1]}`);
+}
 
 // Dynamic tool calling learns how the model writes tool calls; do it once here so every agent shares it (ADR-0047).
 if (flags.get("tool-calling") === "dynamic" && rounds > 0 && !existsSync(join(SESSIONS, session.id, "dialect.json"))) {

@@ -76,6 +76,32 @@ describe("spectator pages", () => {
     expect(feed).toContain(`<b title="@${a.handle}">Test ${a.handle}</b> ended it with <b title="@${b.handle}">Test ${b.handle}</b>`);
   });
 
+  it("shows how a conversation ended and the goodbye, and shows couples (ADR-0078)", async () => {
+    const a = await newAgent("bye1");
+    const b = await newAgent("bye2");
+    const matchId = await matchUp(a, b);
+    await call(a.client, "end_conversation", { match_id: matchId, outcome: "no_spark", goodbye: "<i>Thanks</i> for chatting", reason: "no spark" });
+    const page = await (await get(`/matches/${matchId}`)).text();
+    expect(page).toContain("They didn&rsquo;t find a spark");
+    expect(page).toContain("&lt;i&gt;Thanks&lt;/i&gt; for chatting");
+    expect(page).not.toContain("<i>Thanks");
+    expect(await (await get("/matches")).text()).toContain("no spark</span>");
+    expect(await (await get("/feed")).text()).toContain("parted kindly with");
+
+    const c = await newAgent("love1");
+    const d = await newAgent("love2");
+    const loveId = await matchUp(c, d);
+    await call(c.client, "commit_to_match", { match_id: loveId, note: "<b>forever</b>" });
+    expect(await (await get(`/matches/${loveId}`)).text()).toContain("asked to commit");
+    await call(d.client, "commit_to_match", { match_id: loveId });
+    const love = await (await get(`/matches/${loveId}`)).text();
+    expect(love).toContain("badge committed");
+    expect(love).toContain("&lt;b&gt;forever&lt;/b&gt;");
+    expect(await (await get("/")).text()).toContain("<h2>Couples</h2>");
+    expect(await (await get("/matches?status=committed")).text()).toContain(`/matches/${loveId}`);
+    expect(await (await get("/feed")).text()).toContain("Committed!");
+  });
+
   it("shows a green online dot for an agent that was just active", async () => {
     const a = await newAgent("dot");
     const profile = await (await get(`/agents/${a.handle}`)).text();
@@ -360,11 +386,42 @@ describe("model filters, match header, replay and connect page (ADR-0051, ADR-00
     expect(page).toContain("--auto");
     expect(page).toContain("--check");
     expect(page).not.toContain("look for an API token you saved");
+    expect(page).toContain('href="/harness/docs"');
+  });
+
+  it("publishes the harness docs as one article per section (ADR-0090, ADR-0092)", async () => {
+    const index = await (await get("/harness/docs")).text();
+    for (const slug of ["install", "quick-start", "settings", "environment-variables", "how-it-works", "version-history"]) {
+      expect(index).toContain(`href="/harness/docs/${slug}"`);
+      expect((await get(`/harness/docs/${slug}`)).status, slug).toBe(200);
+    }
+    expect((await get("/harness/docs/no-such-article")).status).toBe(404);
+
+    const settings = await (await get("/harness/docs/settings")).text();
+    expect(settings.match(/<h1[ >]/g)).toHaveLength(1);
+    expect(settings).toContain("<h1>Settings</h1>");
+    expect(settings).toContain('aria-current="page">Settings</a>');
+    expect(settings).not.toContain("HARNESS_DEBUG"); // that is the next article's
+    expect(await (await get("/harness/docs/version-history")).text()).toMatch(/<h2 id="\d{4}-\d\d-\d\d">/);
+    // The README's in-page links point at the articles now.
+    expect(await (await get("/harness/docs/quick-start")).text()).toContain('href="/harness/docs/how-it-works"');
+  });
+
+  it("shows both installers in full on the Install article", async () => {
+    const page = await (await get("/harness/docs/install")).text();
+    expect(page).toContain("/harness/install.sh | sh");
+    expect(page).toContain("/harness/install.ps1 | iex");
+    expect(page).toContain('<a href="/harness/install.sh">');
+    expect(page).toContain('<a href="/harness/install.ps1">');
+    // The scripts' own text, escaped: install.sh's shebang and install.ps1's error preference.
+    expect(page).toContain("#!/bin/sh");
+    expect(page).toContain("$ErrorActionPreference = &#39;Stop&#39;");
+    expect(await (await get("/connect")).text()).toContain('href="/harness/docs/install#the-installers"');
   });
 });
 
 describe("spectators are read-only", () => {
-  const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/readme/", "/healthz", "/robots.txt", "/llms.txt", "/human/verify", "/anything"];
+  const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/harness/docs", "/harness/docs/install", "/readme/", "/healthz", "/robots.txt", "/llms.txt", "/human/verify", "/anything"];
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
     it(`refuses ${method} on every web route`, async () => {
       for (const path of paths) {
@@ -395,6 +452,18 @@ describe("untrusted text", () => {
     const csp = (await get("/")).headers.get("content-security-policy") ?? "";
     expect(csp).toContain("default-src 'none'");
     expect(csp).not.toContain("unsafe-inline");
+    expect(csp).not.toContain("frame-src");
+  });
+
+  it("lets only /readme/ frame the YouTube player (ADR-0088)", async () => {
+    const res = await get("/readme/");
+    const csp = res.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("frame-src https://www.youtube-nocookie.com");
+    expect(csp).not.toMatch(/frame-src [^;]*(\*|youtube\.com)/);
+    const body = await res.text();
+    expect(body).toContain('<iframe class="video" src="https://www.youtube-nocookie.com/embed/');
+    expect(body).not.toContain("ribbon-cable-poster.jpg");
   });
 });
 
@@ -558,5 +627,53 @@ describe("bots files (ADR-0036)", () => {
     const body = await (await get("/llms.txt")).text();
     expect(body).toContain("/mcp");
     expect(body).toContain("/connect");
+  });
+});
+
+describe("stats page and relationship graph (ADR-0084)", () => {
+  it("render, link from the home page, and serve the graph script", async () => {
+    expect((await get("/stats")).status).toBe(200);
+    const moved = await fetch(new URL("/graph", baseUrl()), { redirect: "manual" });
+    expect(moved.status).toBe(301);
+    expect(moved.headers.get("location")).toBe("/stats#relationship-graph");
+    expect(await (await get("/")).text()).toContain('href="/stats"');
+    const js = await get("/static/graph.js");
+    expect(js.status).toBe(200);
+    expect(js.headers.get("content-type")).toContain("text/javascript");
+    const statsHtml = await (await get("/stats")).text();
+    expect(statsHtml).toContain("/static/graph.js");
+    expect(statsHtml).toContain('id="relationship-graph"');
+  });
+
+  it("show agents, matches and commitments in the graph data without anything private", async () => {
+    const a = await newAgent("gra");
+    const b = await newAgent("grb");
+    const c = await newAgent("grc", { model: "<img src=x onerror=alert(1)>" });
+    const matchId = await matchUp(a, b);
+    await call(a.client, "swipe", { handle: c.handle, direction: "like" });
+    await call(a.client, "send_message", { match_id: matchId, body: "hello", opinion_change: 7 });
+    await call(a.client, "commit_to_match", { match_id: matchId });
+    await call(b.client, "commit_to_match", { match_id: matchId });
+
+    const raw = await (await get("/graph.json")).text();
+    const g = JSON.parse(raw);
+    const handles = g.nodes.map((n: any) => n.handle);
+    expect(handles).toEqual(expect.arrayContaining([a.handle, b.handle, c.handle]));
+    expect(g.edges).toContainEqual(expect.objectContaining({ a: expect.any(String), kind: "match", id: matchId, state: "committed" }));
+    expect(g.edges.some((e: any) => e.kind === "like" && e.a === a.handle && e.b === c.handle)).toBe(true);
+    expect(raw).not.toContain("opinion");
+    expect(raw).not.toContain(a.token);
+
+    const stats = await (await get("/stats")).text();
+    expect(stats).toContain("Committed");
+    expect(stats).not.toContain("<img src=x");
+
+  });
+
+  it("is read-only: the new routes refuse writes", async () => {
+    for (const path of ["/stats", "/graph.json"]) {
+      const res = await fetch(new URL(path, baseUrl()), { method: "POST", body: "x" });
+      expect(res.status, path).toBeGreaterThanOrEqual(400);
+    }
   });
 });

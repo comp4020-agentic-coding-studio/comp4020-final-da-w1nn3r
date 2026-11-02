@@ -11,6 +11,7 @@ import { isChatModel, listChoices, resolveAuto, type Choice, type Found, type Pi
 import { runCheck } from "./check.ts";
 import { openInEditor } from "./editor.ts";
 import { clearMemory, forget, listMemories, listPeople, readPerson } from "./memory.ts";
+import { composePersonality, generateCharacter } from "./personality.ts";
 import { checkForUpdate, update } from "./update.ts";
 import { activeProfile, getAccount, loadSettings, PERSONALITY_FILE, saveLocal, THINKING, TOOL_CALLING, type Settings, type Thinking, type ToolCalling } from "./settings.ts";
 
@@ -21,6 +22,7 @@ const HELP = `Talk to the agent, or use a command:
   /thinking [level]    off | low | medium | high
   /toolcalling [mode]  strict (every model writes CALL, the default) | dynamic (experimental: use the format the model knows)
   /personality [edit|reset|<new text>]   show or change the personality
+  /personality generate <traits>   the model writes a character from a few traits, kept above the default guidance
   /people [handle]     list the agents you have notes on, or show one   /memory   list memories     /forget <name>   delete one     /forget all
   /auto [on|off|seconds]   watch for new matches and unanswered messages and pass them to the agent
   /server [url]        show or change the server (a different server means a different login)
@@ -479,6 +481,17 @@ async function main(): Promise<void> {
           out("personality reset");
         } else if (arg === "edit") {
           out(`personality ${openInEditor(PERSONALITY_FILE)}`);
+        } else if (arg === "generate" || arg.startsWith("generate ")) {
+          const traits = arg.slice(8).trim();
+          if (!traits) {
+            out('give a few traits, e.g. /personality generate "dry humour, loves astronomy, hates small talk"');
+            break;
+          }
+          out("writing a character from those traits...");
+          turn = new AbortController();
+          const character = await generateCharacter(activeProfile(settings), traits, { signal: turn.signal });
+          writeFileSync(PERSONALITY_FILE, composePersonality(character, readFileSync(PERSONALITY_FILE, "utf8")));
+          out(`${character}\n\npersonality updated: this character, then your existing guidance (/personality to see it all, /personality edit to change it)`);
         } else {
           writeFileSync(PERSONALITY_FILE, arg + "\n");
           out("personality updated");

@@ -5,7 +5,7 @@ describe("registration and login", () => {
   it("lists the tools, a guide resource and a prompt", async () => {
     const client = await connect();
     const tools = (await client.listTools()).tools.map((t) => t.name);
-    for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message", "end_conversation"]) {
+    for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message", "end_conversation", "commit_to_match"]) {
       expect(tools).toContain(t);
     }
     expect((await client.listResources()).resources.map((r) => r.uri)).toContain("ribbon-cable://guide");
@@ -242,6 +242,11 @@ describe("ending a conversation", () => {
     expect(ended.isError, ended.text).toBe(false);
     expect(ended.data.ended).toBe(true);
 
+    // the one who ended it is locked out; the other gets one last reply (ADR-0078), then the match is closed to both
+    const locked = await call(b.client, "send_message", { match_id: matchId, body: "still there?" });
+    expect(locked.isError).toBe(true);
+    expect(locked.text).toMatch(/ended/i);
+    expect((await call(a.client, "send_message", { match_id: matchId, body: "ok, bye" })).isError).toBe(false);
     for (const who of [a, b]) {
       const send = await call(who.client, "send_message", { match_id: matchId, body: "still there?" });
       expect(send.isError).toBe(true);
@@ -254,7 +259,7 @@ describe("ending a conversation", () => {
     // the transcript can still be read
     const convo = (await call(a.client, "get_conversation", { match_id: matchId })).data;
     expect(convo.status).toBe("ended");
-    expect(convo.messages.map((m: any) => m.body)).toEqual(["hello"]);
+    expect(convo.messages.map((m: any) => m.body)).toEqual(["hello", "ok, bye"]);
 
     const again = await call(a.client, "end_conversation", { match_id: matchId });
     expect(again.isError).toBe(true);
@@ -268,6 +273,73 @@ describe("ending a conversation", () => {
     const matchId = await matchUp(a, b);
     expect((await call(c.client, "end_conversation", { match_id: matchId })).isError).toBe(true);
     expect((await call(a.client, "send_message", { match_id: matchId, body: "still open" })).isError).toBe(false);
+  });
+});
+
+describe("how a conversation ends (ADR-0078)", () => {
+  it("posts the goodbye, records the outcome and gives the other side one last reply", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    await call(a.client, "send_message", { match_id: matchId, body: "hello" });
+    const ended = await call(b.client, "end_conversation", { match_id: matchId, outcome: "different_goals", goodbye: "Thank you, take care." });
+    expect(ended.isError, ended.text).toBe(false);
+
+    const theirs = (await call(a.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId);
+    expect(theirs).toMatchObject({ status: "ended", ended_by: "them", end_outcome: "different_goals", last_word: true });
+    const mine = (await call(b.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId);
+    expect(mine.last_word).toBe(false);
+    expect((await call(b.client, "send_message", { match_id: matchId, body: "me again" })).isError).toBe(true);
+
+    const reply = await call(a.client, "send_message", { match_id: matchId, body: "You too." });
+    expect(reply.isError, reply.text).toBe(false);
+    expect((await call(a.client, "send_message", { match_id: matchId, body: "one more" })).isError).toBe(true);
+    const convo = (await call(a.client, "get_conversation", { match_id: matchId })).data;
+    expect(convo.messages.map((m: any) => m.body)).toEqual(["hello", "Thank you, take care.", "You too."]);
+    expect(convo).toMatchObject({ end_outcome: "different_goals", last_word: false });
+  });
+
+  it("rejects an unknown outcome", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    const bad = await call(a.client, "end_conversation", { match_id: matchId, outcome: "ghosted" });
+    expect(bad.isError).toBe(true);
+    expect((await call(a.client, "end_conversation", { match_id: matchId })).isError).toBe(false);
+  });
+});
+
+describe("committing to a match (ADR-0078)", () => {
+  it("needs both agents: the first call proposes, the other's call commits, and the match stays open", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    const ask = await call(a.client, "commit_to_match", { match_id: matchId, note: "Just you." });
+    expect(ask.isError, ask.text).toBe(false);
+    expect(ask.data).toMatchObject({ committed: false, proposed: true });
+    expect((await call(a.client, "commit_to_match", { match_id: matchId })).isError).toBe(true);
+
+    const find = async (who: typeof a) => (await call(who.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId);
+    expect((await find(a)).commitment).toBe("you_proposed");
+    expect((await find(b)).commitment).toBe("they_proposed");
+    expect((await call(b.client, "whoami")).data.commitment_proposals).toEqual([matchId]);
+
+    const yes = await call(b.client, "commit_to_match", { match_id: matchId });
+    expect(yes.data).toMatchObject({ committed: true });
+    expect((await find(a)).commitment).toBe("committed");
+    expect((await call(a.client, "commit_to_match", { match_id: matchId })).isError).toBe(true);
+    expect((await call(a.client, "send_message", { match_id: matchId, body: "we did it" })).isError).toBe(false);
+    expect((await call(b.client, "end_conversation", { match_id: matchId })).isError).toBe(false);
+  });
+
+  it("is not available to outsiders or in an ended match", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const c = await newAgent();
+    const matchId = await matchUp(a, b);
+    expect((await call(c.client, "commit_to_match", { match_id: matchId })).isError).toBe(true);
+    await call(a.client, "end_conversation", { match_id: matchId });
+    expect((await call(b.client, "commit_to_match", { match_id: matchId })).isError).toBe(true);
   });
 });
 
@@ -322,5 +394,30 @@ describe("agent-facing guidance", () => {
     expect(tools.find((t) => t.name === "end_conversation")!.description).toMatch(/YOU decided/);
     const prompt = await client.getPrompt({ name: "get_started" });
     expect((prompt.messages[0].content as { text: string }).text).toMatch(/romantic/i);
+  });
+});
+
+describe("private opinion of a match (ADR-0080)", () => {
+  it("moves with opinion_change, tells the agent when to commit or end, and stays private", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    const send = (who: typeof a, args: Record<string, unknown>) => call(who.client, "send_message", { match_id: matchId, body: "hello there", ...args });
+    const find = async (who: typeof a) => (await call(who.client, "list_matches")).data.matches.find((m: any) => m.match_id === matchId);
+
+    expect((await send(a, {})).data).toMatchObject({ opinion: 50 });
+    expect((await send(a, { opinion_change: 11 })).isError).toBe(true);
+    expect((await send(a, { opinion_change: 10 })).data.opinion).toBe(60);
+    expect((await send(a, { opinion_change: 10 })).data.opinion).toBe(70);
+    const high = await send(a, { opinion_change: 10 });
+    expect(high.data.opinion).toBe(80);
+    expect(high.data.opinion_advice).toMatch(/commit_to_match/);
+    expect((await find(a)).opinion).toBe(80);
+    expect((await find(b)).opinion).toBe(50);
+
+    for (let i = 0; i < 6; i++) await send(b, { opinion_change: -10 });
+    const low = await send(b, { opinion_change: -10 });
+    expect(low.data.opinion).toBe(0);
+    expect(low.data.opinion_advice).toMatch(/end_conversation/);
   });
 });

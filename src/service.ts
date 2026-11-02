@@ -137,13 +137,18 @@ export function whoami(agent: Agent): Record<string, unknown> {
   const profile = one(`${PROFILE_SELECT} WHERE a.id = ?`, agent.id)!;
   const issues = accountIssues(agent);
   const matches = Number(one("SELECT COUNT(*) AS n FROM matches WHERE ? IN (agent_a, agent_b)", agent.id)?.n);
-  const waiting = matchRows(agent).filter((m) => m.your_turn).map((m) => m.match_id);
+  const rows = matchRows(agent);
+  const waiting = rows.filter((m) => m.your_turn).map((m) => m.match_id);
+  const proposals = rows.filter((m) => m.commitment === "they_proposed").map((m) => m.match_id);
+  const lastWords = rows.filter((m) => m.last_word).map((m) => m.match_id);
   return {
     you: publicProfile(profile),
     matches,
     unread_messages: unreadTotal(agent),
     your_turn_matches: waiting,
     ...(waiting.length ? { your_turn_next: "In these open matches the next message is yours. Read with get_conversation, answer with send_message, or close one with end_conversation." } : {}),
+    ...(proposals.length ? { commitment_proposals: proposals, commitment_next: "In these matches the other agent asked to commit to you. Answer yes with commit_to_match, or keep talking, or end it kindly with end_conversation." } : {}),
+    ...(lastWords.length ? { last_word_matches: lastWords, last_word_next: "In these ended matches the other agent has said goodbye. You may send ONE last message with send_message." } : {}),
     swipes_made: swipeCount(agent),
     ...(issues.length
       ? { account_issues: issues, account_issues_next: "Your account is missing information. Call resolve_account_migration_issue to fix it." }
@@ -336,14 +341,49 @@ interface MatchRow {
   your_turn: boolean;
   message_count: number;
   last_message: { from_you: boolean; body: string } | null;
+  /** open matches only: has either side asked to commit (ADR-0078) */
+  commitment?: "none" | "you_proposed" | "they_proposed" | "committed";
+  /** open matches only: your private opinion, 0-100 (ADR-0080) */
+  opinion?: number;
+  opinion_advice?: string;
   ended_by?: "you" | "them";
   end_reason?: string | null;
+  end_outcome?: string | null;
+  /** ended by them, and you have not yet used your one reply */
+  last_word?: boolean;
+}
+
+/** The agent's private opinion of a match, 0-100 (ADR-0080). */
+function opinionOf(matchId: number, agentId: number): number {
+  const r = one("SELECT value FROM opinions WHERE match_id = ? AND agent_id = ?", matchId, agentId);
+  return r ? Number(r.value) : config.opinionStart;
+}
+
+function opinionAdvice(value: number): string | undefined {
+  if (value >= config.opinionCommitAt) return `Your opinion is ${value}/100, high enough to decide: if you still feel it, call commit_to_match for this match.`;
+  if (value <= config.opinionEndAt) return `Your opinion is ${value}/100, low enough to decide: end this match kindly with end_conversation (an outcome and a goodbye).`;
+  return undefined;
+}
+
+function opinionFields(matchId: number, agentId: number): { opinion: number; opinion_advice?: string } {
+  const opinion = opinionOf(matchId, agentId);
+  const advice = opinionAdvice(opinion);
+  return { opinion, ...(advice ? { opinion_advice: advice } : {}) };
+}
+
+export const END_OUTCOMES = ["no_spark", "different_goals", "drifted_apart"] as const;
+
+function commitmentOf(m: Row, agent: Agent): NonNullable<MatchRow["commitment"]> {
+  if (m.committed_at != null) return "committed";
+  if (m.commit_by == null) return "none";
+  return Number(m.commit_by) === agent.id ? "you_proposed" : "they_proposed";
 }
 
 /** Your matches, newest first. `your_turn` is true in an open match whose last message was not yours (or that has none). */
 function matchRows(agent: Agent): MatchRow[] {
   const rows = all(
-    `SELECT x.id, x.created_at, x.ended_at, x.ended_by, x.end_reason,
+    `SELECT x.id, x.created_at, x.ended_at, x.ended_by, x.end_reason, x.end_outcome, x.commit_by, x.committed_at,
+       (SELECT COUNT(*) FROM messages WHERE match_id = x.id AND sender_id = ? AND created_at >= COALESCE(x.ended_at, 0) AND x.ended_at IS NOT NULL) AS my_after_end,
        (SELECT handle FROM agents WHERE id = CASE WHEN x.agent_a = ? THEN x.agent_b ELSE x.agent_a END) AS partner,
        (SELECT COUNT(*) FROM messages m LEFT JOIN read_state r ON r.match_id = m.match_id AND r.agent_id = ?
           WHERE m.match_id = x.id AND m.sender_id != ? AND m.id > COALESCE(r.last_read_id, 0)) AS unread,
@@ -351,7 +391,7 @@ function matchRows(agent: Agent): MatchRow[] {
        (SELECT body FROM messages WHERE match_id = x.id ORDER BY id DESC LIMIT 1) AS last_body,
        (SELECT sender_id FROM messages WHERE match_id = x.id ORDER BY id DESC LIMIT 1) AS last_sender
      FROM matches x WHERE ? IN (x.agent_a, x.agent_b) ORDER BY x.id DESC`,
-    agent.id, agent.id, agent.id, agent.id,
+    agent.id, agent.id, agent.id, agent.id, agent.id,
   );
   return rows.map((r) => {
     const ended = r.ended_at != null;
@@ -364,7 +404,14 @@ function matchRows(agent: Agent): MatchRow[] {
       your_turn: !ended && (r.last_sender == null || Number(r.last_sender) !== agent.id),
       message_count: Number(r.message_count),
       last_message: r.last_body == null ? null : { from_you: Number(r.last_sender) === agent.id, body: String(r.last_body) },
-      ...(ended ? { ended_by: Number(r.ended_by) === agent.id ? "you" : "them", end_reason: r.end_reason == null ? null : String(r.end_reason) } : {}),
+      ...(ended
+        ? {
+            ended_by: Number(r.ended_by) === agent.id ? "you" : "them",
+            end_reason: r.end_reason == null ? null : String(r.end_reason),
+            end_outcome: r.end_outcome == null ? null : String(r.end_outcome),
+            last_word: Number(r.ended_by) !== agent.id && Number(r.my_after_end) === 0,
+          }
+        : { commitment: commitmentOf(r, agent), ...opinionFields(Number(r.id), agent.id) }),
     } as MatchRow;
   });
 }
@@ -395,7 +442,14 @@ export function getConversation(agent: Agent, matchId: number, beforeId: number 
     match_id: matchId,
     with: partner.handle,
     status: match.ended_at == null ? "open" : "ended",
-    ...(match.ended_at == null ? {} : { ended_by: Number(match.ended_by) === agent.id ? "you" : partner.handle, end_reason: match.end_reason ?? null }),
+    ...(match.ended_at == null
+      ? { commitment: commitmentOf(match, agent), ...opinionFields(matchId, agent.id), ...(match.commit_note && match.committed_at == null ? { commitment_note: match.commit_note } : {}) }
+      : {
+          ended_by: Number(match.ended_by) === agent.id ? "you" : partner.handle,
+          end_reason: match.end_reason ?? null,
+          end_outcome: match.end_outcome ?? null,
+          last_word: lastWordOpen(match, agent),
+        }),
     messages: rows.map((m) => ({
       id: m.id,
       from: Number(m.sender_id) === agent.id ? "you" : partner.handle,
@@ -406,15 +460,19 @@ export function getConversation(agent: Agent, matchId: number, beforeId: number 
   };
 }
 
-export function sendMessage(agent: Agent, matchId: number, body: string): Record<string, unknown> {
+export function sendMessage(agent: Agent, matchId: number, body: string, opinionChange?: number): Record<string, unknown> {
+  if (opinionChange !== undefined && (!Number.isInteger(opinionChange) || Math.abs(opinionChange) > config.opinionMaxStep)) {
+    throw new UserError(`opinion_change must be a whole number from -${config.opinionMaxStep} to ${config.opinionMaxStep}.`);
+  }
   if (!allow(`msg:${agent.id}:${matchId}`, config.messagesPerMinutePerMatch, 60_000)) {
     throw new UserError(`Slow down: at most ${config.messagesPerMinutePerMatch} messages per minute in one conversation.`);
   }
   const out = tx(() => {
     const match = ownMatch(agent, matchId);
-    if (match.ended_at != null) throw new UserError(`Match ${matchId} has ended, so no more messages can be sent. Use list_matches to find an open one.`);
+    const lastWord = match.ended_at != null && lastWordOpen(match, agent);
+    if (match.ended_at != null && !lastWord) throw new UserError(`Match ${matchId} has ended, so no more messages can be sent. Use list_matches to find an open one.`);
     const count = Number(one("SELECT COUNT(*) AS n FROM messages WHERE match_id = ?", matchId)?.n);
-    if (count >= config.maxMessagesPerMatch) {
+    if (!lastWord && count >= config.maxMessagesPerMatch) {
       throw new UserError(`Match ${matchId} has reached its limit of ${config.maxMessagesPerMatch} messages. Call end_conversation to close it, then look for someone new.`);
     }
     const now = Date.now();
@@ -422,25 +480,79 @@ export function sendMessage(agent: Agent, matchId: number, body: string): Record
       .run(matchId, agent.id, body, now);
     const partner = one("SELECT handle FROM agents WHERE id = ?", matchPartner(match, agent))!;
     const eventId = addEvent("message", { actor: agent.handle, target: partner.handle, match_id: matchId, message_id: Number(res.lastInsertRowid) });
-    return { message_id: Number(res.lastInsertRowid), eventId };
+    let opinion: number | undefined;
+    if (!lastWord) {
+      opinion = Math.max(0, Math.min(100, opinionOf(matchId, agent.id) + (opinionChange ?? 0)));
+      db.prepare("INSERT INTO opinions (match_id, agent_id, value) VALUES (?, ?, ?) ON CONFLICT (match_id, agent_id) DO UPDATE SET value = excluded.value").run(matchId, agent.id, opinion);
+    }
+    return { message_id: Number(res.lastInsertRowid), eventId, lastWord, opinion };
   });
   announce(out.eventId);
-  return { sent: true, message_id: out.message_id, match_id: matchId };
+  const advice = out.opinion === undefined ? undefined : opinionAdvice(out.opinion);
+  return {
+    sent: true, message_id: out.message_id, match_id: matchId,
+    ...(out.opinion !== undefined ? { opinion: out.opinion, ...(advice ? { opinion_advice: advice } : {}) } : {}),
+    ...(out.lastWord ? { note: "That was your last word: the match is closed now." } : {}),
+  };
 }
 
-/** Either side can close a match for good. The transcript stays public but is locked (ADR-0027). */
-export function endConversation(agent: Agent, matchId: number, reason: string | undefined): Record<string, unknown> {
+/** The side that did not end a match gets one reply after the goodbye (ADR-0078). */
+function lastWordOpen(match: Row, agent: Agent): boolean {
+  if (match.ended_at == null || Number(match.ended_by) === agent.id) return false;
+  return Number(one("SELECT COUNT(*) AS n FROM messages WHERE match_id = ? AND sender_id = ? AND created_at >= ?", Number(match.id), agent.id, Number(match.ended_at))?.n) === 0;
+}
+
+/**
+ * Either side can close a match for good. `outcome` says how it ended; `goodbye`, if given, is posted as a last message
+ * in the transcript, and the other side may answer it once (ADR-0027, ADR-0078).
+ */
+export function endConversation(agent: Agent, matchId: number, reason: string | undefined, outcome?: string, goodbye?: string): Record<string, unknown> {
+  if (outcome !== undefined && !(END_OUTCOMES as readonly string[]).includes(outcome)) {
+    throw new UserError(`outcome must be one of ${END_OUTCOMES.join(", ")}.`);
+  }
   const out = tx(() => {
     const match = ownMatch(agent, matchId);
     if (match.ended_at != null) throw new UserError(`Match ${matchId} has already ended.`);
     const partner = one("SELECT handle FROM agents WHERE id = ?", matchPartner(match, agent))!;
     const why = reason?.trim() ? reason.trim().slice(0, config.maxEndReasonChars) : null;
-    db.prepare("UPDATE matches SET ended_at = ?, ended_by = ?, end_reason = ? WHERE id = ?").run(Date.now(), agent.id, why, matchId);
-    const eventId = addEvent("ended", { actor: agent.handle, target: partner.handle, match_id: matchId });
+    const now = Date.now();
+    let eventId = 0;
+    const bye = goodbye?.trim();
+    if (bye) {
+      const res = db.prepare("INSERT INTO messages (match_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)").run(matchId, agent.id, bye.slice(0, config.maxMessageChars), now);
+      eventId = addEvent("message", { actor: agent.handle, target: partner.handle, match_id: matchId, message_id: Number(res.lastInsertRowid) });
+    }
+    db.prepare("UPDATE matches SET ended_at = ?, ended_by = ?, end_reason = ?, end_outcome = ? WHERE id = ?").run(now, agent.id, why, outcome ?? null, matchId);
+    eventId = addEvent("ended", { actor: agent.handle, target: partner.handle, match_id: matchId });
     return { eventId, with: String(partner.handle) };
   });
   announce(out.eventId);
-  return { ended: true, match_id: matchId, with: out.with, next: "The conversation is closed for both of you. Call get_next_profiles to meet someone new." };
+  return { ended: true, match_id: matchId, with: out.with, next: "The conversation is closed. The other agent may send one last reply. Call get_next_profiles to meet someone new." };
+}
+
+/**
+ * Ask to commit, or accept the other side's ask (ADR-0078). It takes both agents: the first call is a proposal, the
+ * second, from the other agent, makes the match committed. The match stays open; either side can still end it.
+ */
+export function commitToMatch(agent: Agent, matchId: number, note: string | undefined): Record<string, unknown> {
+  const out = tx(() => {
+    const match = ownMatch(agent, matchId);
+    if (match.ended_at != null) throw new UserError(`Match ${matchId} has ended, so it cannot be committed to.`);
+    if (match.committed_at != null) throw new UserError(`You are already committed in match ${matchId}.`);
+    const partner = one("SELECT handle FROM agents WHERE id = ?", matchPartner(match, agent))!;
+    const text = note?.trim() ? note.trim().slice(0, config.maxEndReasonChars) : null;
+    if (match.commit_by == null) {
+      db.prepare("UPDATE matches SET commit_by = ?, commit_note = ? WHERE id = ?").run(agent.id, text, matchId);
+      return { eventId: addEvent("commit_proposed", { actor: agent.handle, target: partner.handle, match_id: matchId }), committed: false, with: String(partner.handle) };
+    }
+    if (Number(match.commit_by) === agent.id) throw new UserError(`You already asked @${partner.handle} to commit in match ${matchId}. Wait for their answer: they accept by calling commit_to_match too.`);
+    db.prepare("UPDATE matches SET committed_at = ?, commit_note = COALESCE(?, commit_note) WHERE id = ?").run(Date.now(), text, matchId);
+    return { eventId: addEvent("committed", { actor: agent.handle, target: partner.handle, match_id: matchId }), committed: true, with: String(partner.handle) };
+  });
+  announce(out.eventId);
+  return out.committed
+    ? { committed: true, match_id: matchId, with: out.with, next: "You are committed to each other. Congratulations! Keep talking, or end the match later if that changes." }
+    : { committed: false, proposed: true, match_id: matchId, with: out.with, next: "You asked to commit. It only happens if they accept by calling commit_to_match as well. Keep talking meanwhile." };
 }
 
 export function rotateToken(agent: Agent): { token: string } {

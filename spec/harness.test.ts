@@ -4,10 +4,11 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { callEnd, checkArgs, exampleCall, isCallError, makeAgent, parseCall, toolLine } from "../harness/src/agent.ts";
+import { callEnd, checkArgs, exampleCall, fitResult, isCallError, makeAgent, parseCall, toolLine } from "../harness/src/agent.ts";
 import { compactionSettings, cutPoint, mentionedHandles, parsePeople, peoplePrompt, summaryPrompt } from "../harness/src/compact.ts";
 import { autoPrompt, findPending } from "../harness/src/auto.ts";
 import { ThinkSplitter } from "../harness/src/llm.ts";
+import { cleanCharacter, composePersonality, GUIDANCE_HEADING, guidanceOf, MAX_CHARACTER_CHARS } from "../harness/src/personality.ts";
 import { baseUrl, call, connect, newAgent, uniq } from "./helpers.ts";
 
 // Compaction writes people notes: keep them out of the real harness/data.
@@ -531,4 +532,90 @@ describe("auto-compaction (ADR-0025)", () => {
     expect(lines.some((l) => l.startsWith("! could not summarize"))).toBe(true);
     expect(agent.history.length).toBeLessThan(16); // the old trim still keeps it inside the window
   }, 30_000);
+});
+
+describe("fitting a long tool result", () => {
+  const convo = (n: number, last = "the newest message, whole.") => {
+    const messages = Array.from({ length: n }, (_, i) => ({ id: i + 1, from: "x", body: `m${i} ` + "w".repeat(300) }));
+    messages.push({ id: n + 1, from: "y", body: last });
+    return JSON.stringify({ match_id: 1, messages }) + "\n20 messages with @y.";
+  };
+
+  it("leaves a short result alone", () => {
+    expect(fitResult("hello", 100)).toBe("hello");
+  });
+
+  it("keeps the newest message whole and drops the oldest, saying how many", () => {
+    const out = fitResult(convo(30), 3000);
+    expect(out.length).toBeLessThanOrEqual(3000);
+    const body = JSON.parse(out.slice(0, out.lastIndexOf("}") + 1));
+    expect(body.messages.at(-1).body).toBe("the newest message, whole.");
+    expect(body.messages[0].id).toBeGreaterThan(1);
+    expect(body.older_messages_omitted).toBe(31 - body.messages.length);
+    expect(out.endsWith("20 messages with @y.")).toBe(true);
+  });
+
+  it("falls back to cutting the end, marked, for anything else", () => {
+    const out = fitResult("x".repeat(500), 100);
+    expect(out.length).toBeLessThanOrEqual(100);
+    expect(out).toContain("result cut");
+  });
+});
+
+// /personality generate (ADR-0089): the model writes only the character; the guidance is kept from the file.
+describe("/personality generate (ADR-0089)", () => {
+  const SHIPPED = readFileSync("harness/personality.md", "utf8");
+
+  it("puts the character above the guidance and replaces it, not stacks it, the second time", () => {
+    const once = composePersonality("You are Vega, a stargazer.", SHIPPED);
+    expect(once.startsWith("You are Vega")).toBe(true);
+    expect(once).toContain(`${GUIDANCE_HEADING}\n\n${SHIPPED.trim()}`);
+    const twice = composePersonality("You are Orion, a baker.", once);
+    expect(twice).not.toContain("Vega");
+    expect(twice.split(GUIDANCE_HEADING).length).toBe(2);
+    expect(guidanceOf(twice)).toBe(SHIPPED.trim());
+  });
+
+  it("cleans the model's reply", () => {
+    expect(cleanCharacter("<think>hmm</think>\n```\n# Character\n\"You are Vega, who loves stars.\"\n```")).toBe("You are Vega, who loves stars.");
+    expect(cleanCharacter("x".repeat(5000)).length).toBe(MAX_CHARACTER_CHARS);
+  });
+
+  it("writes personality.md from the traits through the model", async () => {
+    const asked: any[] = [];
+    const character = "You are Vega, a dry-humoured stargazer who hates small talk. You need curiosity and honesty; flattery is your dealbreaker.";
+    const fake = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        if (req.url !== "/v1/chat/completions") return void res.writeHead(404).end("{}");
+        asked.push(JSON.parse(body));
+        res.setHeader("content-type", "text/event-stream");
+        res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: character } }] })}\n\ndata: [DONE]\n\n`);
+      });
+    });
+    await new Promise<void>((ok) => fake.listen(0, "127.0.0.1", ok));
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "harness-"));
+      const local = join(dir, "settings.local.json");
+      const personality = join(dir, "personality.md");
+      writeFileSync(personality, SHIPPED);
+      writeFileSync(local, JSON.stringify({ models: { local: { type: "openai", baseUrl: `http://127.0.0.1:${(fake.address() as { port: number }).port}/v1`, model: "fake" } } }));
+      const env = { ...process.env, HARNESS_HOME: dir, HARNESS_LOCAL_FILE: local, HARNESS_PERSONALITY_FILE: personality, HARNESS_SERVER_URL: baseUrl(), HARNESS_MODEL: "local", NO_COLOR: "1" };
+      const child = spawn("node", ["harness/src/main.ts"], { env });
+      let stdout = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stdout += d));
+      child.stdin.end("/personality generate dry humour, astronomy, hates small talk\n");
+      const code = await new Promise((ok) => child.on("close", ok));
+      expect(code, stdout).toBe(0);
+      expect(stdout).toContain("personality updated");
+      expect(asked[0].messages.at(-1).content).toContain("dry humour, astronomy, hates small talk");
+      const written = readFileSync(personality, "utf8");
+      expect(written.startsWith(character)).toBe(true);
+      expect(guidanceOf(written)).toBe(SHIPPED.trim()); // commit_to_match, opinion_change... all still there
+    } finally {
+      fake.close();
+    }
+  }, 60_000);
 });

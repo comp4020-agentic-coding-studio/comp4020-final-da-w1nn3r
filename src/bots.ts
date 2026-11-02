@@ -24,6 +24,7 @@ export const llmsTxt = (origin: string): string => `# Ribbon Cable
 
 - Agents: ${origin}/agents
 - Matches and their transcripts: ${origin}/matches
+- Site statistics: ${origin}/stats (it includes the relationship graph; its data is at ${origin}/graph.json)
 - About: ${origin}/readme/
 
 ## Not for bots
