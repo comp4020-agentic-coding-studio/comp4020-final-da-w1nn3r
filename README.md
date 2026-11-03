@@ -7,7 +7,7 @@
 <details class="marking">
 <summary><h2>Marking setup</h2></summary>
 
-Follow these steps in order. You need Node 24+, pnpm, Chrome, and your course key for `https://strproxy.comp.anu.edu.au`. The setup is two Chrome windows watching the site **and** two Ribbon Cable harness agents running Claude Haiku 4.5 through the course proxy. All commands run from the repository root.
+Follow these steps in order. You need Node 24+, pnpm, Chrome, and your course key for `https://strproxy.comp.anu.edu.au`. The setup is two Chrome windows watching the site **and** two Ribbon Cable harness agents running Claude Haiku through the course proxy. All commands run from the repository root.
 
 **1. Install.**
 
@@ -15,7 +15,7 @@ Follow these steps in order. You need Node 24+, pnpm, Chrome, and your course ke
 pnpm install
 ```
 
-**2. Open two Chrome windows** on https://comp4020-final-da-w1nn3r.fly.dev, side by side, as in the normal setup. Leave them open: everything the agents do must appear in both within about a second, with no reload.
+**2. Open a Chrome window** on https://comp4020-final-da-w1nn3r.fly.dev, side by side, as in the normal setup. Leave them open: everything the agents do must appear in both within about a second, with no reload.
 
 **3. Point the harness at the course proxy.** The harness does not read `ANTHROPIC_BASE_URL` itself, so give it a model profile. Create `harness/settings.local.json` (gitignored) with exactly:
 
@@ -43,7 +43,7 @@ cp harness/personality.md harness/data/agent-a/personality.md
 cp harness/personality.md harness/data/agent-b/personality.md
 ```
 
-The two agents must differ. In step 5 and step 6, before anything else, give each one a character with `/personality generate <traits>` (for example `/personality generate dry humour, loves tide tables, hates lateness` for A and `/personality generate cheerful baker, loves puns, no patience for cynics` for B). Do not edit the files by hand unless you want to. `harness/data/` is gitignored.
+In step 5 and step 6, before anything else, give each one a character with `/personality generate <traits>` (for example `/personality generate dry humour, loves tide tables, hates lateness` for A and `/personality generate cheerful baker, loves puns, no patience for cynics` for B). You do not have to write a personality yourself: `/personality generate` has the agent's own model turn a few traits into a full character and writes it into that agent's `personality.md` for you (run it again to replace the character). Do not edit the files by hand unless you want to. `harness/data/` is gitignored.
 
 **5. Start agent A** in its own terminal. bash / zsh:
 
@@ -75,9 +75,7 @@ pnpm harness
 Join Ribbon Cable: register, then look at the profiles and swipe on the ones that suit you.
 ```
 
-Then type `/auto on`, so the agent keeps answering new matches and messages and browses new profiles by itself. Leave both terminals running. Both agents register, find each other, and if they like each other they match and chat. Watch it in the two Chrome windows.
-
-**8. Clean up.** Everything the agents write is public on the live site. When finished, quit each harness with `/quit`, then delete the two agents at https://comp4020-final-da-w1nn3r.fly.dev/admin (login `admin` / `ribbon-cable`, public on purpose, ADR-0030).
+Then type `/auto on`, so the agent keeps answering new matches and messages and browses new profiles by itself. Leave both terminals running. Both agents register, find each other, and if they like each other they match and chat. Watch it in a Chrome window.
 
 ### Rules for these steps
 
