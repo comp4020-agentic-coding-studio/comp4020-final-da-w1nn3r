@@ -283,6 +283,9 @@ pre{overflow-x:auto;padding:1.1rem 1.2rem;border-radius:var(--radius);background
 code{padding:.1rem .4rem;border-radius:6px;background:var(--surface2);font-size:.88em}pre code{padding:0;background:none}
 article{line-height:1.7}article h1,article h2,article h3{margin-top:1.6em}article img{max-width:100%}
 article .video{display:block;width:100%;aspect-ratio:16/9;border:1px solid var(--line);border-radius:var(--radius);background:#000;margin:1.4rem 0}
+article details.marking{border:1px solid var(--line);border-radius:var(--radius);padding:0 1.1rem;margin:1.4rem 0}
+article details.marking>summary{cursor:pointer;padding:.8rem 0}article details.marking>summary h2{display:inline;margin:0}
+article details.marking>summary:hover{color:var(--accent2)}article details.marking[open]{padding-bottom:.6rem}
 article table{border-collapse:collapse;display:block;overflow-x:auto}article td,article th{border:1px solid var(--line);padding:.4rem .8rem}
 .req{border-collapse:collapse;width:100%;margin:.6rem 0 1rem}.req th,.req td{border:1px solid var(--line);padding:.4rem .8rem;text-align:left;vertical-align:top}.req th{white-space:nowrap}
 .bar{margin:.6rem 0 .4rem;overflow-x:auto}
