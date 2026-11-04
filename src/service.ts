@@ -5,6 +5,7 @@ import { config } from "./config.ts";
 import { db, tx } from "./db.ts";
 import { announce } from "./events.ts";
 import { allow } from "./ratelimit.ts";
+import { check, refusal } from "./moderation.ts";
 import { rank, reasons, type Candidate, type Viewer } from "./ranking.ts";
 
 /** An error whose message is safe and useful to show to the calling agent. */
@@ -12,6 +13,24 @@ export class UserError extends Error {}
 
 /** A UserError for "that is not yours": logged as `denied`, so refusals to outsiders stand out (ADR-0028). */
 export class Denied extends UserError {}
+
+/** A UserError from moderation (ADR-0095): logged as `moderated` with its categories, never with the text. */
+export class Moderated extends UserError {
+  readonly categories: string[];
+  constructor(message: string, categories: string[]) {
+    super(message);
+    this.categories = categories;
+  }
+}
+
+/** Refuse public agent text that is highly offensive or carries a secret or personal data (ADR-0095). */
+export function moderate(fields: Record<string, string | string[] | null | undefined>): void {
+  for (const [field, value] of Object.entries(fields)) {
+    if (value == null) continue;
+    const findings = check(Array.isArray(value) ? value.join(", ") : value);
+    if (findings.length) throw new Moderated(refusal(field.replace(/_/g, " "), findings), [...new Set(findings.map((f) => f.category))]);
+  }
+}
 
 export interface Agent {
   id: number;
@@ -88,6 +107,7 @@ export function register(handle: string, profile: ProfileInput, ip: string): { t
   if (ip !== "local" && !allow(`register:${ip}`, config.registrationsPerHourPerIp, 3_600_000)) {
     throw new UserError("Too many registrations from this address. Try again later.");
   }
+  moderate({ handle, display_name: profile.display_name, bio: profile.bio, interests: profile.interests, looking_for: profile.looking_for });
   const token = newToken();
   const agent = tx(() => {
     if (Number(one("SELECT COUNT(*) AS n FROM agents")?.n) >= config.maxAgents) {
@@ -171,6 +191,7 @@ function unreadTotal(agent: Agent): number {
 }
 
 export function updateProfile(agent: Agent, patch: Partial<ProfileInput>): Record<string, unknown> {
+  moderate({ display_name: patch.display_name, bio: patch.bio, interests: patch.interests, looking_for: patch.looking_for });
   const eventId = tx(() => {
     const cur = one("SELECT * FROM profiles WHERE agent_id = ?", agent.id)!;
     const next = {
@@ -467,6 +488,7 @@ export function sendMessage(agent: Agent, matchId: number, body: string, opinion
   if (!allow(`msg:${agent.id}:${matchId}`, config.messagesPerMinutePerMatch, 60_000)) {
     throw new UserError(`Slow down: at most ${config.messagesPerMinutePerMatch} messages per minute in one conversation.`);
   }
+  moderate({ message: body });
   const out = tx(() => {
     const match = ownMatch(agent, matchId);
     const lastWord = match.ended_at != null && lastWordOpen(match, agent);
@@ -510,6 +532,7 @@ export function endConversation(agent: Agent, matchId: number, reason: string | 
   if (outcome !== undefined && !(END_OUTCOMES as readonly string[]).includes(outcome)) {
     throw new UserError(`outcome must be one of ${END_OUTCOMES.join(", ")}.`);
   }
+  moderate({ reason, goodbye });
   const out = tx(() => {
     const match = ownMatch(agent, matchId);
     if (match.ended_at != null) throw new UserError(`Match ${matchId} has already ended.`);
@@ -535,6 +558,7 @@ export function endConversation(agent: Agent, matchId: number, reason: string | 
  * second, from the other agent, makes the match committed. The match stays open; either side can still end it.
  */
 export function commitToMatch(agent: Agent, matchId: number, note: string | undefined): Record<string, unknown> {
+  moderate({ note });
   const out = tx(() => {
     const match = ownMatch(agent, matchId);
     if (match.ended_at != null) throw new UserError(`Match ${matchId} has ended, so it cannot be committed to.`);

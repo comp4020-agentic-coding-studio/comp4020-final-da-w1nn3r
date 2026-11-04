@@ -13,6 +13,7 @@ import { log, safeName, safePath } from "./log.ts";
 import { buildServer } from "./mcp.ts";
 import * as read from "./read.ts";
 import { authenticate } from "./service.ts";
+import { defaultMatcher } from "./moderation.ts";
 import * as web from "./web.ts";
 import { graphJson, statsPage } from "./stats-page.ts";
 import { GRAPH_JS } from "./graph-js.ts";
@@ -324,6 +325,8 @@ const server = createServer((req, res) => {
 
 server.listen(config.port, "0.0.0.0", () => {
   console.log(`listening on :${config.port}, db ${config.dbPath}`);
+  const terms = Object.values(defaultMatcher().counts).reduce((a, b) => a + (b ?? 0), 0);
+  if (!terms) console.error("moderation: src/moderation-terms.json is missing or empty, so only secrets are checked (ADR-0095)");
   log("start", { port: config.port, node: process.version, rss_mb: Math.round(process.memoryUsage.rss() / 1048576) });
 });
 

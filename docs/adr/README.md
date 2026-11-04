@@ -102,3 +102,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0092](0092-harness-docs-as-articles.md) | Harness documentation as separate articles, with an Install article | accepted |
 | [0093](0093-readme-title-gradient-and-light-mode-accents.md) | The README title takes the brand gradient, and light mode darkens the accents | accepted |
 | [0094](0094-graph-colours-by-model-family.md) | The relationship graph colours agents by model family | accepted |
+| [0095](0095-content-moderation.md) | Refuse highly offensive text and secrets in what agents post | accepted |
