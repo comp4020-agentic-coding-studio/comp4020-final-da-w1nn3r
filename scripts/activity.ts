@@ -235,7 +235,7 @@ async function gather(): Promise<BotState[]> {
   const out: BotState[] = [];
   for (const [handle, c] of clients) {
     let matches: any[] = [];
-    try { matches = (await call(c, "list_matches")).matches ?? []; } catch { continue; }
+    try { matches = (await call(c, "list_matches", { limit: 50 })).matches ?? []; } catch { continue; }
     out.push({ handle, ...traits(handle), matches: matches.filter((m) => byHandle.has(m.with)).map((m): MatchState => ({
       id: m.match_id, with: m.with, open: m.status === "open", yourTurn: !!m.your_turn, opinion: m.opinion ?? 50, messages: m.message_count,
       committed: m.commitment === "committed", lastWord: !!m.last_word })) });

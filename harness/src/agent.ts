@@ -291,10 +291,24 @@ export interface Live { token(kind: Kind, s: string): void; end(): void }
 
 const MAX_RESULT_CHARS = 5000;
 
+/** Every array inside a JSON value that belongs to an object key, with its owner, so it can be shortened in place. */
+function arraysIn(value: unknown, out: { owner: Record<string, unknown>; key: string }[] = []): { owner: Record<string, unknown>; key: string }[] {
+  if (Array.isArray(value)) for (const v of value) arraysIn(v, out);
+  else if (value && typeof value === "object") {
+    for (const [key, v] of Object.entries(value)) {
+      if (Array.isArray(v)) out.push({ owner: value as Record<string, unknown>, key });
+      arraysIn(v, out);
+    }
+  }
+  return out;
+}
+
 /**
- * Fits a tool result into `max` characters. A conversation is cut from its oldest end, so the newest message always
- * arrives whole (chopping the string would cut the latest message mid-sentence, and the agent would reply to half of it).
- * Anything else is cut at the end with a marker.
+ * Fits a tool result into `max` characters, keeping it valid JSON. While it is too long, the largest list loses one
+ * item: `messages` from its oldest end, so the newest message always arrives whole (chopping the string would cut it
+ * mid-sentence, and the agent would reply to half of it); any other list (matches, profiles) from its end, since the
+ * server sends those best or newest first. Each shortened list's owner gets `omitted` ({list: how many}) and the top
+ * level a plain note. Only text that is not JSON, or JSON that will not fit even so, is cut at the end with a marker.
  */
 export function fitResult(text: string, max = MAX_RESULT_CHARS): string {
   if (text.length <= max) return text;
@@ -302,11 +316,27 @@ export function fitResult(text: string, max = MAX_RESULT_CHARS): string {
   if (start >= 0 && end > start) {
     try {
       const obj = JSON.parse(text.slice(start, end + 1));
-      if (Array.isArray(obj.messages) && obj.messages.length > 1) {
-        const all = obj.messages.length;
-        const build = (): string => text.slice(0, start) + JSON.stringify({ ...obj, older_messages_omitted: all - obj.messages.length }) + text.slice(end + 1);
-        while (obj.messages.length > 1 && build().length > max) obj.messages.shift();
-        const out = build();
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        const cut = new Map<string, number>();
+        const build = (): string => text.slice(0, start) + JSON.stringify(obj) + text.slice(end + 1);
+        let out = build();
+        while (out.length > max) {
+          const lists = arraysIn(obj).filter((l) => (l.owner[l.key] as unknown[]).length > 1);
+          if (!lists.length) break;
+          const size = (l: (typeof lists)[number]) => JSON.stringify(l.owner[l.key]).length;
+          const big = lists.reduce((a, b) => (size(b) > size(a) ? b : a));
+          const list = big.owner[big.key] as unknown[];
+          if (big.key === "messages") list.shift();
+          else list.pop();
+          const prev = big.owner.omitted;
+          const omitted = (prev && typeof prev === "object" && !Array.isArray(prev) ? prev : {}) as Record<string, number>;
+          omitted[big.key] = (omitted[big.key] ?? 0) + 1;
+          big.owner.omitted = omitted;
+          if (big.key === "messages") big.owner.older_messages_omitted = omitted[big.key];
+          cut.set(big.key, (cut.get(big.key) ?? 0) + 1);
+          obj.omitted_note = `Too long to show whole: ${[...cut].map(([k, n]) => `${n} ${k}`).join(", ")} left out.`;
+          out = build();
+        }
         if (out.length <= max) return out;
       }
     } catch {}
@@ -531,7 +561,7 @@ export function makeAgent(settings: Settings): Agent {
     for (;;) {
       let seenAny = false;
       if (wantMessages) {
-        const m = await poll("list_matches", {});
+        const m = await poll("list_matches", { limit: 50 });
         if (m) {
           seenAny = true;
           const found = findPending(m.matches as MatchInfo[], announced);

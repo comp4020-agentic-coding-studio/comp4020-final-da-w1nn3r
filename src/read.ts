@@ -1,6 +1,7 @@
 // Read-only queries for the spectator site. Only ever uses `readDb`: this file
 // cannot write, by construction (CLAUDE.md hard rule).
 import { readDb } from "./db.ts";
+import { modelFamily } from "./insights.ts";
 
 type Row = Record<string, unknown>;
 const all = (sql: string, ...args: (string | number)[]): Row[] => readDb.prepare(sql).all(...args) as Row[];
@@ -71,8 +72,9 @@ function enrich(events: FeedEvent[]): FeedEvent[] {
   }));
 }
 
-export const recentEvents = (limit: number): FeedEvent[] =>
-  enrich(all("SELECT * FROM events ORDER BY id DESC LIMIT ?", limit).map(toEvent));
+/** The newest `limit` events, or with `before` the newest below that id (the feed's older pages, ADR-0101). */
+export const recentEvents = (limit: number, before?: number): FeedEvent[] =>
+  enrich(all("SELECT * FROM events WHERE id < ? ORDER BY id DESC LIMIT ?", before ?? Number.MAX_SAFE_INTEGER, limit).map(toEvent));
 
 export const eventsAfter = (id: number, limit = 100): FeedEvent[] =>
   enrich(all("SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?", id, limit).map(toEvent));
@@ -136,8 +138,37 @@ export interface AgentFilter { q: string; seen: (typeof SEEN)[number]; activity:
 /** Every model name agents have registered with, most common first (ADR-0052). Filters only accept these. */
 export const listModels = (): { model: string; n: number }[] =>
   all("SELECT model, COUNT(*) AS n FROM profiles GROUP BY model ORDER BY n DESC, model COLLATE NOCASE").map((r) => ({ model: String(r.model), n: Number(r.n) }));
-/** A model filter value: one of the registered models, or "" for any. */
-const pickModel = (value: string | null): string => (value && listModels().some((m) => m.model === value) ? value : "");
+/** A filter value that stands for a whole model family (ADR-0101), e.g. "family:Gemma". */
+export const FAMILY_PREFIX = "family:";
+/** The registered models grouped by family (insights.modelFamily, ADR-0094), biggest family first. */
+export function listModelFamilies(): { family: string; n: number; models: { model: string; n: number }[] }[] {
+  const by = new Map<string, { family: string; n: number; models: { model: string; n: number }[] }>();
+  for (const m of listModels()) {
+    const family = modelFamily(m.model);
+    const g = by.get(family) ?? { family, n: 0, models: [] };
+    g.n += m.n;
+    g.models.push(m);
+    by.set(family, g);
+  }
+  return [...by.values()].sort((a, b) => b.n - a.n || a.family.localeCompare(b.family));
+}
+/** A model filter value: one of the registered models, "family:<name>" for a registered family, or "" for any. */
+const pickModel = (value: string | null): string => {
+  if (!value) return "";
+  if (listModels().some((m) => m.model === value)) return value;
+  if (value.startsWith(FAMILY_PREFIX) && listModelFamilies().some((f) => f.family === value.slice(FAMILY_PREFIX.length))) return value;
+  return "";
+};
+/** The raw model names a filter value covers: one model, or every registered model in the family. */
+const modelsFor = (value: string): string[] =>
+  value.startsWith(FAMILY_PREFIX) && !listModels().some((m) => m.model === value)
+    ? listModels().map((m) => m.model).filter((m) => modelFamily(m) === value.slice(FAMILY_PREFIX.length))
+    : [value];
+/** `col IN (...)` for a filter value, with its bound arguments. Model names never reach the SQL text. */
+const inModels = (col: string, value: string): { sql: string; args: string[] } => {
+  const ms = modelsFor(value);
+  return { sql: `${col} IN (${marks(ms.length)})`, args: ms };
+};
 
 const pick = <T extends string>(options: readonly T[], value: string | null): T => (options.includes(value as T) ? (value as T) : options[0]);
 export const parseAgentFilter = (p: URLSearchParams): AgentFilter => ({
@@ -174,7 +205,7 @@ export function listAgents(f: AgentFilter = parseAgentFilter(new URLSearchParams
   if (f.seen === "older") { where.push("(a.last_seen_at IS NULL OR a.last_seen_at <= ?)"); args.push(now - 7 * DAY_MS); }
   if (f.activity === "active") where.push(`${ACTIONS} > 0`);
   if (f.activity === "none") where.push(`${ACTIONS} = 0`);
-  if (f.model) { where.push("p.model = ?"); args.push(f.model); }
+  if (f.model) { const c = inModels("p.model", f.model); where.push(c.sql); args.push(...c.args); }
   const from = `FROM agents a JOIN profiles p ON p.agent_id = a.id
      LEFT JOIN (SELECT swiper_id AS id, COUNT(*) AS n FROM swipes GROUP BY swiper_id) s ON s.id = a.id
      LEFT JOIN (SELECT sender_id AS id, COUNT(*) AS n FROM messages GROUP BY sender_id) m ON m.id = a.id
@@ -234,8 +265,16 @@ export function listMatches(f: MatchFilter = parseMatchFilter(new URLSearchParam
   const where: string[] = [];
   const args: (string | number)[] = [];
   // One model: either side has it. Two: one side has each, so "gemma with qwen" finds every Gemma-Qwen pair.
-  if (f.model && f.with) { where.push("((pa.model = ? AND pb.model = ?) OR (pa.model = ? AND pb.model = ?))"); args.push(f.model, f.with, f.with, f.model); }
-  else if (f.model || f.with) { where.push("(pa.model = ? OR pb.model = ?)"); args.push(f.model || f.with, f.model || f.with); }
+  // A value may be a whole family (ADR-0101): "Gemma with Qwen" finds every pair of a Gemma model and a Qwen model.
+  if (f.model && f.with) {
+    const [am, bw, aw, bm] = [inModels("pa.model", f.model), inModels("pb.model", f.with), inModels("pa.model", f.with), inModels("pb.model", f.model)];
+    where.push(`((${am.sql} AND ${bw.sql}) OR (${aw.sql} AND ${bm.sql}))`);
+    args.push(...am.args, ...bw.args, ...aw.args, ...bm.args);
+  } else if (f.model || f.with) {
+    const [a, b] = [inModels("pa.model", f.model || f.with), inModels("pb.model", f.model || f.with)];
+    where.push(`(${a.sql} OR ${b.sql})`);
+    args.push(...a.args, ...b.args);
+  }
   if (f.status === "open") where.push("x.ended_at IS NULL");
   if (f.status === "committed") where.push("x.committed_at IS NOT NULL AND x.ended_at IS NULL");
   if (f.status === "ended") where.push("x.ended_at IS NOT NULL");
@@ -288,8 +327,11 @@ export const featuredMatches = (limit: number): Row[] =>
 
 export const MAX_TRANSCRIPT = 500;
 
-/** The latest MAX_TRANSCRIPT messages, oldest first; `total` says how many exist. */
-export function matchDetail(id: number): { match: Row; messages: Row[]; total: number } | null {
+/**
+ * The latest MAX_TRANSCRIPT messages, oldest first, or with `before` the latest below that message id (older pages,
+ * ADR-0101). `total` says how many exist; `older` how many come before the first one shown.
+ */
+export function matchDetail(id: number, before?: number): { match: Row; messages: Row[]; total: number; older: number } | null {
   const match = one(
     `SELECT x.id, x.created_at, x.ended_at, x.end_reason, x.end_outcome, x.committed_at, x.commit_note, e.handle AS ended_by, cb.handle AS commit_by, a.handle AS a_handle, b.handle AS b_handle,
        pa.display_name AS a_name, pa.emoji AS a_emoji, pa.color AS a_color, pa.model AS a_model, pb.display_name AS b_name, pb.emoji AS b_emoji, pb.color AS b_color, pb.model AS b_model
@@ -301,9 +343,10 @@ export function matchDetail(id: number): { match: Row; messages: Row[]; total: n
   if (!match) return null;
   const messages = all(
     `SELECT m.id, m.body, m.created_at, s.handle AS sender FROM messages m
-     JOIN agents s ON s.id = m.sender_id WHERE m.match_id = ? ORDER BY m.id DESC LIMIT ?`,
-    id, MAX_TRANSCRIPT,
+     JOIN agents s ON s.id = m.sender_id WHERE m.match_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`,
+    id, before ?? Number.MAX_SAFE_INTEGER, MAX_TRANSCRIPT,
   ).reverse();
   const total = Number(one("SELECT COUNT(*) AS n FROM messages WHERE match_id = ?", id)?.n);
-  return { match, messages, total };
+  const older = messages.length ? Number(one("SELECT COUNT(*) AS n FROM messages WHERE match_id = ? AND id < ?", id, Number(messages[0].id))?.n) : 0;
+  return { match, messages, total, older };
 }

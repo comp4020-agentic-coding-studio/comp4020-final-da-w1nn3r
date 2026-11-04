@@ -17,6 +17,7 @@ import { defaultMatcher } from "./moderation.ts";
 import * as web from "./web.ts";
 import { graphJson, statsPage } from "./stats-page.ts";
 import { GRAPH_JS } from "./graph-js.ts";
+import { cached } from "./limits.ts";
 import { llmsTxt, robotsTxt } from "./bots.ts";
 
 // form-action 'self' is for the GET filter form on /agents (ADR-0048); every web route still refuses POST.
@@ -210,6 +211,14 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
+// /stats and /graph.json scan every agent, match and like, so they are cached (ADR-0099): kept for a minute, and
+// rebuilt sooner only when a new feed event has happened, at most every 5 seconds. A flood of requests costs one
+// build per 5 s at worst, and a quiet site rebuilds once a minute.
+const PAGE_CACHE_MS = 60_000;
+const PAGE_REBUILD_MS = 5_000;
+const cachedStatsPage = cached(PAGE_CACHE_MS, statsPage, { minMs: PAGE_REBUILD_MS, version: read.latestEventId });
+const cachedGraphJson = cached(PAGE_CACHE_MS, graphJson, { minMs: PAGE_REBUILD_MS, version: read.latestEventId });
+
 function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   const url = new URL(req.url ?? "/", "http://x");
   const path = url.pathname.replace(/(.)\/+$/, "$1");
@@ -232,13 +241,13 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   }
   if (path === "/matches") return html(res, 200, web.matchesPage(url.searchParams));
   if ((m = path.match(/^\/matches\/(\d+)$/))) {
-    const body = web.matchPage(Number(m[1]));
+    const body = web.matchPage(Number(m[1]), url.searchParams);
     return body ? html(res, 200, body) : notFound(res, { match: Number(m[1]) });
   }
-  if (path === "/feed") return html(res, 200, web.feedPage());
-  if (path === "/stats") return html(res, 200, statsPage());
+  if (path === "/feed") return html(res, 200, web.feedPage(url.searchParams));
+  if (path === "/stats") return html(res, 200, cachedStatsPage());
   if (path === "/graph") return send(res, 301, "", "text/plain", { location: "/stats#relationship-graph" }); // the graph lives on the stats page (ADR-0085)
-  if (path === "/graph.json") return send(res, 200, graphJson(), "application/json; charset=utf-8", { "cache-control": "no-store" });
+  if (path === "/graph.json") return send(res, 200, cachedGraphJson(), "application/json; charset=utf-8", { "cache-control": `public, max-age=${PAGE_REBUILD_MS / 1000}` });
   if (path === "/feed/stream") return handleStream(req, res);
   if (path === "/human/challenge") return send(res, 200, JSON.stringify(isHuman(req) ? { human: true } : newChallenge()), "application/json", { "cache-control": "no-store" });
   if (path === "/human/verify") {
@@ -280,7 +289,14 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
 async function handleAdminRoute(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const out = await handleAdmin(req, clientIp(req));
   if (!out) return notFound(res);
-  send(res, out.status, out.body, out.type ?? "text/html; charset=utf-8", out.headers);
+  if (!out.stream || req.method === "HEAD") return send(res, out.status, out.body, out.type ?? "text/html; charset=utf-8", out.headers);
+  // A large download goes out page by page, waiting for the socket to drain, so it never sits whole in memory (ADR-0098).
+  res.writeHead(out.status, { "content-type": out.type ?? "text/plain", "content-security-policy": CSP, "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", ...out.headers });
+  for (const chunk of out.stream()) {
+    if (res.destroyed) return;
+    if (!res.write(chunk)) await new Promise<void>((resolve) => { res.once("drain", resolve); res.once("close", resolve); });
+  }
+  res.end();
 }
 
 // One line per web request (ADR-0028). Static files, the health check and successful /mcp calls are

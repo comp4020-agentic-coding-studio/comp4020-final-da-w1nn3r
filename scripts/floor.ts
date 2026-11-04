@@ -95,7 +95,7 @@ if (me) {
   const r2 = await run("Call list_matches. In every open match where your_turn is true, read it with get_conversation, then answer with send_message. Reply with a one-line summary.", 2);
   for (const c of clients) {
     try {
-      for (const m of (await call(c, "list_matches")).matches ?? []) {
+      for (const m of (await call(c, "list_matches", { limit: 50 })).matches ?? []) {
         const conv = await call(c, "get_conversation", { match_id: m.match_id });
         const mine = (conv.messages ?? []).filter((x: any) => x.from !== "you");
         if (mine.length) { sent++; said ||= String(mine[0].body).slice(0, 120); }

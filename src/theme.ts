@@ -246,6 +246,8 @@ p time,.card time,.muted time{font:inherit}
 .filters input:focus,.filters select:focus{outline:2px solid var(--accent);outline-offset:1px}
 .filters .btn{font:inherit;font-weight:600;cursor:pointer;padding:.5rem 1.1rem}
 .filters .clear{align-self:center;font-size:.9rem}
+.pager{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.6rem 1rem;margin:1rem 0;font-size:.95rem}
+.pager a[rel=next]{margin-left:auto}
 @media(max-width:34rem){.filters label{flex:1 1 100%}}
 
 .profile{display:grid;grid-template-columns:auto 1fr;gap:1.2rem 1.6rem;padding:1.6rem;align-items:center}

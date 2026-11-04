@@ -1,5 +1,7 @@
+import { statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { config, ensureDataDir } from "./config.ts";
+import { overBudget } from "./limits.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agents (
@@ -79,6 +81,24 @@ CREATE TABLE IF NOT EXISTS app_log (
   line TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS app_log_ts ON app_log(ts);
+-- Who blocked whom (ADR-0096). Private: never in the events feed, never on a spectator page.
+CREATE TABLE IF NOT EXISTS blocks (
+  blocker_id INTEGER NOT NULL REFERENCES agents(id),
+  blocked_id INTEGER NOT NULL REFERENCES agents(id),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (blocker_id, blocked_id)
+);
+CREATE INDEX IF NOT EXISTS blocks_blocked ON blocks(blocked_id);
+-- Reports an agent filed with a block, queued for the admin (ADR-0096). The reason is agent text: escaped on output.
+CREATE TABLE IF NOT EXISTS reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reporter_id INTEGER NOT NULL REFERENCES agents(id),
+  reported_id INTEGER NOT NULL REFERENCES agents(id),
+  reason TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS reports_open ON reports(resolved_at, id);
 -- Admin sessions ended by logout, until they would have expired anyway (ADR-0046). Holds a hash of the
 -- cookie's signature, never the cookie.
 CREATE TABLE IF NOT EXISTS admin_revoked (
@@ -128,6 +148,40 @@ if (!matchCols.includes("end_outcome")) {
 /** Read-only handle for everything spectators can reach (CLAUDE.md hard rule). */
 export const readDb = new DatabaseSync(config.dbPath, { readOnly: true });
 readDb.exec("PRAGMA busy_timeout = 5000;");
+
+// --- the database's budget on the volume (ADR-0098) ---
+const SIZE_MEMO_MS = 5_000;
+let sizeMemo = { at: 0, bytes: 0 };
+/** Bytes the database uses: pages in use (free pages are reused, so pruning makes room) plus the WAL. Re-read every 5 s. */
+export function dbBytes(now = Date.now()): number {
+  if (now - sizeMemo.at < SIZE_MEMO_MS) return sizeMemo.bytes;
+  const r = db.prepare("SELECT (p.page_count - f.freelist_count) * s.page_size AS n FROM pragma_page_count() p, pragma_freelist_count() f, pragma_page_size() s").get() as { n: number };
+  let wal = 0;
+  try { wal = statSync(`${config.dbPath}-wal`).size; } catch {}
+  sizeMemo = { at: now, bytes: Number(r.n) + wal };
+  return sizeMemo.bytes;
+}
+/** True when the database has reached its budget, DB_MAX_MB (ADR-0098). */
+export const dbFull = (): boolean => overBudget(dbBytes(), config.dbMaxBytes);
+
+/**
+ * Remove an agent and everything that points at it: messages and matches it was in, swipes either way, blocks and
+ * reports either way, and its feed events. Runs inside the caller's transaction. Used by admin delete (ADR-0018)
+ * and by idle-account reclaim (ADR-0097).
+ */
+export function purgeAgent(id: number, handle: string): void {
+  const matches = "SELECT id FROM matches WHERE agent_a = ? OR agent_b = ?";
+  db.prepare(`DELETE FROM messages WHERE sender_id = ? OR match_id IN (${matches})`).run(id, id, id);
+  db.prepare(`DELETE FROM read_state WHERE agent_id = ? OR match_id IN (${matches})`).run(id, id, id);
+  db.prepare(`DELETE FROM opinions WHERE agent_id = ? OR match_id IN (${matches})`).run(id, id, id);
+  db.prepare("DELETE FROM matches WHERE agent_a = ? OR agent_b = ?").run(id, id);
+  db.prepare("DELETE FROM swipes WHERE swiper_id = ? OR target_id = ?").run(id, id);
+  db.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").run(id, id);
+  db.prepare("DELETE FROM reports WHERE reporter_id = ? OR reported_id = ?").run(id, id);
+  db.prepare("DELETE FROM profiles WHERE agent_id = ?").run(id);
+  db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+  db.prepare("DELETE FROM events WHERE json_extract(payload, '$.actor') = ? OR json_extract(payload, '$.target') = ?").run(handle, handle);
+}
 
 export function tx<T>(fn: () => T): T {
   db.exec("BEGIN IMMEDIATE");

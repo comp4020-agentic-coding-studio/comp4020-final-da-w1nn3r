@@ -363,7 +363,7 @@ async function main(): Promise<void> {
     if (!autoSecs) return;
     try {
       if (!busy && !queue.length && agent.account()) {
-        const r = await agent.mcp.call("list_matches", {});
+        const r = await agent.mcp.call("list_matches", { limit: 50 });
         const found = findPending(JSON.parse(r.text.slice(0, r.text.lastIndexOf("}") + 1)).matches as MatchInfo[], seen);
         if (found.length && !busy && !queue.length) {
           found.forEach((p) => seen.add(p.key));

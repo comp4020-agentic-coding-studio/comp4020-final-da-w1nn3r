@@ -1,23 +1,29 @@
 // The stored log (ADR-0034): every line src/log.ts writes is also kept in SQLite, so an admin can
 // download it by ISO week. Lines are already redacted by log.ts; nothing extra is stored here.
 import { config } from "./config.ts";
-import { db } from "./db.ts";
+import { db, dbFull } from "./db.ts";
+import { capRows } from "./limits.ts";
 import { setSink } from "./log.ts";
 
 const DAY = 86_400_000;
-/** A week of a busy deployment can be large and the admin response is built in memory (256 MB app). */
-export const MAX_DOWNLOAD_LINES = 200_000;
+/** A download is streamed in pages of this many lines (ADR-0098), so memory stays flat however big the week is. */
+export const DOWNLOAD_PAGE = 2_000;
 
 const insert = db.prepare("INSERT INTO app_log (ts, event, line) VALUES (?, ?, ?)");
 setSink((ts, event, line) => {
+  // Past the database budget the log is only written to stdout (ADR-0098): it must not be what fills the volume.
+  if (dbFull()) return;
   insert.run(ts, event, line);
 });
 
-export function prune(now = Date.now()): number {
-  return Number(db.prepare("DELETE FROM app_log WHERE ts < ?").run(now - config.logRetentionDays * DAY).changes);
+/** Drop lines older than the retention, then the oldest lines beyond LOG_MAX_ROWS (ADR-0034, ADR-0098). */
+export function prune(now = Date.now(), maxRows = config.logMaxRows): number {
+  const n = Number(db.prepare("DELETE FROM app_log WHERE ts < ?").run(now - config.logRetentionDays * DAY).changes);
+  return n + capRows(db, "app_log", maxRows);
 }
 prune();
-setInterval(prune, 6 * 3_600_000).unref();
+// Hourly: the row cap has to keep up with a flood, not just with age.
+setInterval(() => prune(), 3_600_000).unref();
 
 // --- ISO weeks, in UTC: Monday to Sunday, week 1 holds 4 January ---
 const mondayOfWeek1 = (year: number): number => {
@@ -67,14 +73,25 @@ export function weeks(): WeekSummary[] {
   return [...out.values()].sort((a, b) => b.start - a.start);
 }
 
-/** The week's lines as JSON Lines, oldest first, and whether the cap cut it short. */
-export function download(label: string): { name: string; body: string; truncated: boolean } | null {
+/**
+ * The week's lines as JSON Lines, oldest first, as a stream of pages (ADR-0098): each page is a short query by id,
+ * so no read transaction is held between pages and at most DOWNLOAD_PAGE lines are in memory at once.
+ */
+export function download(label: string): { name: string; pages: () => Generator<string> } | null {
   const range = label === "all" ? ([0, Number.MAX_SAFE_INTEGER] as [number, number]) : weekRange(label);
   if (!range) return null;
-  const rows = db
-    .prepare("SELECT line FROM app_log WHERE ts >= ? AND ts < ? ORDER BY id LIMIT ?")
-    .all(range[0], range[1], MAX_DOWNLOAD_LINES + 1) as { line: string }[];
-  const truncated = rows.length > MAX_DOWNLOAD_LINES;
-  const body = rows.slice(0, MAX_DOWNLOAD_LINES).map((r) => r.line).join("\n");
-  return { name: `ribbon-cable-log-${label}.jsonl`, body: body ? `${body}\n` : "", truncated };
+  const page = db.prepare("SELECT id, line FROM app_log WHERE ts >= ? AND ts < ? AND id > ? ORDER BY id LIMIT ?");
+  return {
+    name: `ribbon-cable-log-${label}.jsonl`,
+    *pages() {
+      let after = 0;
+      for (;;) {
+        const rows = page.all(range[0], range[1], after, DOWNLOAD_PAGE) as { id: number; line: string }[];
+        if (!rows.length) return;
+        after = Number(rows[rows.length - 1].id);
+        yield rows.map((r) => `${r.line}\n`).join("");
+        if (rows.length < DOWNLOAD_PAGE) return;
+      }
+    },
+  };
 }

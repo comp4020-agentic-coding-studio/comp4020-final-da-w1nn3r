@@ -1,6 +1,6 @@
 # ADR-0034: Keep the log in SQLite and let admin download it by week
 
-- Status: accepted
+- Status: accepted (point 4's download cap superseded by ADR-0098)
 - Date: 2026-10-15
 
 ## Context

@@ -218,7 +218,7 @@ async function matchCounts(token: string, appUrl: string): Promise<{ matches: nu
   try {
     const c = new McpClient(appUrl);
     c.token = token;
-    const text = (await c.call("list_matches", {})).text;
+    const text = (await c.call("list_matches", { limit: 50 })).text;
     const matches = JSON.parse(text.slice(0, text.lastIndexOf("}") + 1)).matches as { status: string; last_message: { from_you: boolean } | null }[];
     return { matches: matches.length, open: matches.filter((m) => m.status === "open").length, sent: matches.filter((m) => m.last_message?.from_you).length };
   } catch {

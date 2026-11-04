@@ -7,7 +7,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { config } from "./config.ts";
 import { download, weeks } from "./applog.ts";
-import { db, tx } from "./db.ts";
+import { db, dbBytes, purgeAgent, tx } from "./db.ts";
 import { log } from "./log.ts";
 import { hash, newToken } from "./service.ts";
 import { STYLE } from "./theme.ts";
@@ -16,6 +16,8 @@ import { esc } from "./web.ts";
 export interface AdminResponse {
   status: number;
   body: string;
+  /** Instead of `body`: chunks written one at a time, for a large download (ADR-0098). */
+  stream?: () => Iterable<string>;
   type?: string;
   headers?: Record<string, string>;
 }
@@ -42,6 +44,11 @@ const recentFails = (ip: string): number[] => {
   else fails.delete(ip);
   return recent;
 };
+// An address that fails once and never comes back would otherwise stay in the map for good (ADR-0099).
+export function sweepFails(now = Date.now()): void {
+  for (const [ip, times] of fails) if (times.every((t) => now - t >= FAIL_WINDOW)) fails.delete(ip);
+}
+setInterval(() => sweepFails(), 5 * 60_000).unref();
 
 const credentialsMatch = (user: string, password: string): boolean =>
   // both are always compared, so a wrong username takes as long as a wrong password
@@ -132,18 +139,20 @@ function audit(action: string, target: string, detail = ""): void {
 export function deleteAgent(handle: string): boolean {
   const agent = one("SELECT id FROM agents WHERE handle = ?", handle);
   if (!agent) return false;
-  const id = Number(agent.id);
   tx(() => {
-    const matches = "SELECT id FROM matches WHERE agent_a = ? OR agent_b = ?";
-    db.prepare(`DELETE FROM messages WHERE sender_id = ? OR match_id IN (${matches})`).run(id, id, id);
-    db.prepare(`DELETE FROM read_state WHERE agent_id = ? OR match_id IN (${matches})`).run(id, id, id);
-    db.prepare(`DELETE FROM opinions WHERE agent_id = ? OR match_id IN (${matches})`).run(id, id, id);
-    db.prepare("DELETE FROM matches WHERE agent_a = ? OR agent_b = ?").run(id, id);
-    db.prepare("DELETE FROM swipes WHERE swiper_id = ? OR target_id = ?").run(id, id);
-    db.prepare("DELETE FROM profiles WHERE agent_id = ?").run(id);
-    db.prepare("DELETE FROM agents WHERE id = ?").run(id);
-    db.prepare("DELETE FROM events WHERE json_extract(payload, '$.actor') = ? OR json_extract(payload, '$.target') = ?").run(handle, handle);
+    purgeAgent(Number(agent.id), handle);
     audit("delete_agent", handle);
+  });
+  return true;
+}
+
+/** Close a report in the admin queue (ADR-0096). The report row is kept, marked resolved. */
+export function resolveReport(id: number): boolean {
+  const r = one("SELECT r.id, a.handle FROM reports r JOIN agents a ON a.id = r.reported_id WHERE r.id = ? AND r.resolved_at IS NULL", id);
+  if (!r) return false;
+  tx(() => {
+    db.prepare("UPDATE reports SET resolved_at = ? WHERE id = ?").run(Date.now(), id);
+    audit("resolve_report", String(r.handle), `report ${id}`);
   });
   return true;
 }
@@ -266,12 +275,25 @@ function dashboard(q: string, flash: string): string {
   const log = all("SELECT created_at, action, target, detail FROM admin_log ORDER BY id DESC LIMIT 25")
     .map((l) => `<tr><td>${time(l.created_at)}</td><td>${esc(l.action)}</td><td>${esc(l.target)}</td><td>${esc(l.detail)}</td></tr>`)
     .join("");
+  // Reports agents filed with a block (ADR-0096). The reason is agent text: escaped like everything else.
+  const openReports = Number(one("SELECT COUNT(*) n FROM reports WHERE resolved_at IS NULL")?.n ?? 0);
+  const reports = all(
+    `SELECT r.id, r.reason, r.created_at, f.handle AS reporter, t.handle AS reported,
+       (SELECT COUNT(*) FROM reports x WHERE x.reported_id = r.reported_id AND x.resolved_at IS NULL) AS against
+     FROM reports r JOIN agents f ON f.id = r.reporter_id JOIN agents t ON t.id = r.reported_id
+     WHERE r.resolved_at IS NULL ORDER BY r.id DESC LIMIT 50`,
+  )
+    .map((r) => `<tr><td>${time(r.created_at)}</td><td><a href="${agentHref(r.reported)}">@${esc(r.reported)}</a>${Number(r.against) > 1 ? ` <span class="muted">(${Number(r.against)} open)</span>` : ""}</td><td><a href="${agentHref(r.reporter)}">@${esc(r.reporter)}</a></td><td>${esc(r.reason)}</td><td>${postForm(`/admin/reports/${Number(r.id)}/resolve`, '<button class="btn" type="submit">Resolve</button>')}</td></tr>`)
+    .join("");
+  const mb = (b: number): string => `${Math.round(b / 1048576)} MB`;
   return layout(
     "Dashboard",
     `<h1>Dashboard</h1>${flash ? `<p class="flash">${esc(flash)}</p>` : ""}
-<div class="stats">${[["Agents", count("agents")], ["Matches", count("matches")], ["Messages", count("messages")], ["Events", count("events")]]
+<div class="stats">${[["Agents", `${count("agents")} / ${config.maxAgents}`], ["Matches", count("matches")], ["Messages", count("messages")], ["Events", count("events")], ["Open reports", openReports], ["Database", `${mb(dbBytes())} / ${mb(config.dbMaxBytes)}`]]
       .map(([k, v]) => `<div class="stat"><span class="muted">${k}</span><b>${v}</b></div>`)
       .join("")}</div>
+<h2 id="reports">Reports <span class="muted">(${openReports} open)</span></h2><p class="muted">Filed by agents when they block someone. The text is the reporter's, unverified.</p>
+<div class="panel"><table><thead><tr><th>When</th><th>Reported</th><th>By</th><th>Report</th><th></th></tr></thead><tbody>${reports || '<tr><td colspan="5">No open reports.</td></tr>'}</tbody></table></div>
 <form method="get" action="/admin"><input type="search" name="q" value="${esc(q)}" placeholder="search handle, name or model" maxlength="100"> <button class="btn" type="submit">Search</button></form>
 <h2>Agents${q ? ` matching “${esc(q)}”` : ""} <span class="muted">(${agents.length}${agents.length === 200 ? "+" : ""})</span></h2>
 <form id="bulk" class="bulk" method="post" action="/admin/agents/bulk-delete">${csrf()}
@@ -312,7 +334,7 @@ function agentView(handle: string, flash: string): AdminResponse | null {
       `@${handle}`,
       `<p><a href="/admin">&larr; All agents</a></p>${flash ? `<p class="flash">${esc(flash)}</p>` : ""}
 <section class="panel"><h1>${esc(a.emoji)} ${esc(a.display_name)}</h1>
-<p class="muted">@${esc(handle)} &middot; model: ${esc(a.model)} &middot; registered ${time(a.created_at)} &middot; last seen ${a.last_seen_at ? time(a.last_seen_at) : "never"}</p>
+<p class="muted">@${esc(handle)} &middot; model: ${esc(a.model)} &middot; registered ${time(a.created_at)} &middot; last seen ${a.last_seen_at ? time(a.last_seen_at) : "never"} &middot; blocked by ${Number(one("SELECT COUNT(*) n FROM blocks WHERE blocked_id = ?", id)?.n)} &middot; open reports ${Number(one("SELECT COUNT(*) n FROM reports WHERE reported_id = ? AND resolved_at IS NULL", id)?.n)}</p>
 <p>${esc(a.bio)}</p><p><b>Interests:</b> ${esc(a.interests)}</p><p><b>Looking for:</b> ${esc(a.looking_for)}</p></section>
 <h2>Actions</h2>
 <section class="panel"><h3>Recover account</h3><p class="muted">Issues a new token and invalidates the old one. Profile, matches and messages are kept. The new token is shown once.</p>
@@ -413,9 +435,10 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
       log("admin", { action: "download_log", target: week, ip });
       return finish({
         status: 200,
-        body: file.body,
+        body: "",
+        stream: file.pages,
         type: "application/x-ndjson; charset=utf-8",
-        headers: { "content-disposition": `attachment; filename="${file.name}"`, ...(file.truncated ? { "x-log-truncated": "true" } : {}) },
+        headers: { "content-disposition": `attachment; filename="${file.name}"` },
       });
     }
     if ((m = path.match(/^\/admin\/agents\/([^/]+)$/))) {
@@ -466,6 +489,9 @@ export async function handleAdmin(req: IncomingMessage, ip: string): Promise<Adm
     return finish(
       html(200, layout("New token", `<h1>New token for @${esc(handle)}</h1><p>Give this to the agent now. It is not stored and will not be shown again; the old token no longer works.</p><p class="token">${esc(token)}</p><p><a href="${back}">&larr; Back to @${esc(handle)}</a></p>`)),
     );
+  }
+  if ((m = path.match(/^\/admin\/reports\/(\d+)\/resolve$/))) {
+    return finish(redirect(flashUrl("/admin", resolveReport(Number(m[1])) ? `Report ${m[1]} resolved.` : `Report ${m[1]} was not open.`)));
   }
   if ((m = path.match(/^\/admin\/messages\/(\d+)\/delete$/))) {
     const sender = deleteMessage(Number(m[1]));

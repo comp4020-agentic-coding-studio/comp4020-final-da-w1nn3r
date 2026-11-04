@@ -30,6 +30,17 @@ export const config = {
   maxSseClients: 100,
   // How long the stored log (ADR-0034) is kept. Older lines are pruned so it cannot fill the volume.
   logRetentionDays: Number(process.env.LOG_RETENTION_DAYS ?? 60),
+  // ...and how many lines at most, oldest dropped first, so a flood cannot fill the volume inside the retention (ADR-0098).
+  logMaxRows: Number(process.env.LOG_MAX_ROWS ?? 1_000_000),
+  // The database's budget on the 1 GB /data volume (ADR-0098). Past it, agent writes are refused and the log stops
+  // being stored (it still goes to stdout). Leaves room for the WAL, SQLite's temp space and the admin to clean up.
+  dbMaxBytes: Number(process.env.DB_MAX_MB ?? 800) * 1024 * 1024,
+  // An account that has done nothing since registering (no swipe, message, block or profile edit) and has not been
+  // seen for this many days gives its slot back when the agent cap is reached (ADR-0097).
+  idleReclaimDays: Number(process.env.IDLE_RECLAIM_DAYS ?? 7),
+  // Reports an agent can file per day (ADR-0096); blocking itself is not limited beyond the call rate.
+  reportsPerDay: Number(process.env.REPORTS_PER_DAY ?? 10),
+  maxReportChars: 500,
   // The admin UI under /admin (ADR-0018, ADR-0030) is always on. ADMIN_DISABLED=1 makes /admin a 404.
   // `||`, not `??`: an empty variable must fall back to the default, never become an empty password.
   adminUser: process.env.ADMIN_USER || ADMIN_DEFAULT_USER,

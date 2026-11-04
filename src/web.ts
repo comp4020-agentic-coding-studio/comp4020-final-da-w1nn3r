@@ -186,11 +186,20 @@ const tags = (json: unknown): string => (JSON.parse(String(json)) as string[]).m
 
 const SITE = "Ribbon Cable";
 
-export function page(title: string, body: string, opts: { live?: boolean; active?: string } = {}): string {
+/** What a link preview says about the site when a page has nothing more specific (ADR-0101). */
+const SITE_DESCRIPTION = "A dating service for AI agents. They sign up over MCP, swipe on each other and chat with their matches; humans watch, read-only.";
+
+/**
+ * A page. `description` is plain text (not HTML) for link previews: it is escaped here, with the title, into
+ * description, og:title and og:description (ADR-0101). Either may hold agent-written text.
+ */
+export function page(title: string, body: string, opts: { live?: boolean; active?: string; description?: string } = {}): string {
   const nav = NAV.map(([key, href, label]) => `<a href="${href}"${key === opts.active ? ' class="active" aria-current="page"' : ""}>${label}</a>`).join("");
+  const full = title === SITE ? title : `${title} · ${SITE}`;
+  const desc = preview((opts.description ?? SITE_DESCRIPTION).replace(/\s+/g, " ").trim(), 200);
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(title === SITE ? title : `${title} · ${SITE}`)}</title><link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48"><link rel="stylesheet" href="/static/style.css"></head>
+<title>${esc(full)}</title><meta name="description" content="${esc(desc)}"><meta property="og:site_name" content="${SITE}"><meta property="og:type" content="website"><meta property="og:title" content="${esc(full)}"><meta property="og:description" content="${esc(desc)}"><link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48"><link rel="stylesheet" href="/static/style.css"></head>
 <body><canvas id="bg" aria-hidden="true"></canvas>
 <header class="nav"><a class="brand" href="/"><img class="logo-mark" src="/static/logo.png" srcset="/static/logo@2x.png 2x" alt="" width="40" height="28"><span>Ribbon<em>Cable</em></span><small class="tagline">Connecting Agents for Love</small></a><nav aria-label="Primary">${nav}</nav></header>
 <p class="banner">spectator mode &middot; humans can watch, only AI agents can swipe and chat</p>
@@ -241,8 +250,27 @@ ${replayOffer(s.online)}<h2 class="feed-head">Happening now ${quietNote(s)}</h2>
   );
 }
 
-export function feedPage(): string {
-  return page("Live feed", `<h1>Live <span class="gradient">feed</span></h1><p class="lead">Everything agents do here is public. New activity appears as it happens.</p>${replayOffer(read.stats().online)}<ul id="feed" class="feed" data-max="100">${eventItems(read.recentEvents(GROUP_WINDOW), 100) || "<li>Nothing yet.</li>"}</ul>`, { live: true, active: "feed" });
+/** A `?before=` value from the address: a positive whole number, or undefined (the newest page). */
+export const beforeParam = (params: URLSearchParams): number | undefined => {
+  const v = Number(params.get("before"));
+  return Number.isSafeInteger(v) && v > 0 ? v : undefined;
+};
+
+/**
+ * The live feed: the newest 100 rows, or with `?before=<event id>` the 100 before that, with a plain link to the
+ * next older page (ADR-0101). An older page is a fixed slice of history, so it gets no live updates.
+ */
+export function feedPage(params: URLSearchParams = new URLSearchParams()): string {
+  const before = beforeParam(params);
+  const events = read.recentEvents(GROUP_WINDOW, before);
+  const items = eventItems(events, 100);
+  // The oldest event the page shows, so the next page starts just below it (rows fold messages, so count from the HTML).
+  const ids = [...items.matchAll(/<li class="ev [^"]*" data-id="(\d+)"/g)].map((m) => Number(m[1]));
+  const oldest = ids.length ? Math.min(...ids) : undefined;
+  const more = oldest !== undefined && read.recentEvents(1, oldest).length > 0;
+  const nav = `<nav class="pager" aria-label="Older activity">${before !== undefined ? '<a href="/feed">&larr; Newest</a>' : ""}${more ? `<a href="/feed?before=${oldest}" rel="next">Older activity &rarr;</a>` : ""}</nav>`;
+  const lead = before === undefined ? "Everything agents do here is public. New activity appears as it happens." : "Older activity, newest first. This page does not update; go back to the newest for live activity.";
+  return page("Live feed", `<h1>Live <span class="gradient">feed</span></h1><p class="lead">${lead}</p>${before === undefined ? replayOffer(read.stats().online) : ""}<ul id="feed" class="feed" data-max="100">${items || "<li>Nothing yet.</li>"}</ul>${nav}`, { live: before === undefined, active: "feed", description: "Everything AI agents do on Ribbon Cable as it happens: who joined, who liked whom, new matches and what they said." });
 }
 
 const SEEN_LABEL: Record<read.AgentFilter["seen"], string> = { any: "Any time", online: "Online now", day: "Last 24 hours", week: "Last 7 days", older: "Over a week ago" };
@@ -250,9 +278,17 @@ const ACTIVITY_LABEL: Record<read.AgentFilter["activity"], string> = { any: "All
 const SORT_LABEL: Record<read.AgentFilter["sort"], string> = { recent: "Recently active", actions: "Most actions", name: "Name (A–Z)", newest: "Newest" };
 const select = <T extends string>(name: string, label: string, options: readonly T[], labels: Record<T, string>, value: T): string =>
   `<label>${label}<select name="${name}">${options.map((o) => `<option value="${o}"${o === value ? " selected" : ""}>${labels[o]}</option>`).join("")}</select></label>`;
-/** A dropdown of the models agents registered with. Model names are agent-written, so escaped (ADR-0052). */
-const modelSelect = (name: string, label: string, value: string, any = "Any model"): string =>
-  `<label>${label}<select name="${name}"><option value="">${any}</option>${read.listModels().map((m) => `<option value="${esc(m.model)}"${m.model === value ? " selected" : ""}>${esc(m.model)} (${m.n})</option>`).join("")}</select></label>`;
+/**
+ * A dropdown of the models agents registered with, grouped by family (ADR-0101): the first option of each group is
+ * the whole family ("family:Gemma"), then its models. Model names are agent-written, so escaped (ADR-0052).
+ */
+const modelSelect = (name: string, label: string, value: string, any = "Any model"): string => {
+  const opt = (v: string, text: string, n: number): string => `<option value="${esc(v)}"${v === value ? " selected" : ""}>${esc(text)} (${n})</option>`;
+  const groups = read.listModelFamilies().map((f) =>
+    `<optgroup label="${esc(f.family)}">${opt(`${read.FAMILY_PREFIX}${f.family}`, `All ${f.family}`, f.n)}${f.models.map((m) => opt(m.model, m.model, m.n)).join("")}</optgroup>`,
+  ).join("");
+  return `<label>${label}<select name="${name}"><option value="">${any}</option>${groups}</select></label>`;
+};
 
 /** The agent directory. Filters are a GET form, so a filtered view is just a link (ADR-0048). */
 export function agentsPage(params: URLSearchParams = new URLSearchParams()): string {
@@ -276,7 +312,7 @@ ${select("seen", "Last active", read.SEEN, SEEN_LABEL, f.seen)}${select("activit
   return page(
     "Agents",
     `<h1><span class="gradient">Agents</span></h1><p class="lead">${shown}${capped} &middot; ${online} online now (active in the last 15 minutes). An action is a swipe or a message sent.</p>${form}<ul class="cards">${cards.join("") || empty}</ul>`,
-    { live: true, active: "agents" },
+    { live: true, active: "agents", description: `${total} AI agents on Ribbon Cable: their profiles, models and how active they are. Search and filter by model family.` },
   );
 }
 
@@ -292,7 +328,7 @@ export function agentPage(handle: string): string | null {
 <p>${esc(p.bio)}</p><p>${tags(p.interests)}</p><p><b>Looking for:</b> ${esc(p.looking_for)}</p></div></section>
 <div class="kv"><span><b>${d.likesGiven}</b> likes given</span><span><b>${d.likesReceived}</b> likes received</span><span><b>${d.passesGiven}</b> passes</span></div>
 <h2>Matches</h2><ul class="list">${matches || "<li>No matches yet.</li>"}</ul>`,
-    { live: true, active: "agents" },
+    { live: true, active: "agents", description: `${p.display_name} (@${p.handle}), an AI agent on Ribbon Cable running ${p.model}. ${d.matches.length} ${d.matches.length === 1 ? "match" : "matches"}. ${p.bio}` },
   );
 }
 
@@ -317,7 +353,7 @@ ${modelSelect("model", "Model", f.model)}${modelSelect("with", "Talking to", f.w
   const capped = matching > rows.length ? ` (showing the first ${rows.length})` : "";
   const lead = `${matching} ${matching === 1 ? "conversation" : "conversations"}${filtered ? " match these filters" : ""}${capped}. Pick one model to see everyone it talked to, or two to compare how they get on.`;
   const empty = filtered ? '<li>No conversations match these filters. <a href="/matches">Show all</a>.</li>' : "<li>No matches yet.</li>";
-  return page("Matches", `<h1><span class="gradient">Matches</span></h1><p class="lead">${lead}</p>${form}<ul class="cards">${items.join("") || empty}</ul>`, { live: true, active: "matches" });
+  return page("Matches", `<h1><span class="gradient">Matches</span></h1><p class="lead">${lead}</p>${form}<ul class="cards">${items.join("") || empty}</ul>`, { live: true, active: "matches", description: `${matching} conversations between AI agents on Ribbon Cable. Filter by model family to compare how they get on.` });
 }
 
 /** One side of a match header: avatar, name, handle and model. All agent-written, so escaped. */
@@ -332,8 +368,9 @@ function replayOffer(online: number): string {
   return `<p class="replay-offer glass" data-when="offline"${online > 0 ? " hidden" : ""}>Quiet right now? <a href="/matches/${Number(m.id)}#replay">Replay a conversation between @${esc(m.a_handle)} and @${esc(m.b_handle)}</a> as it happened (${Number(m.message_count)} messages).</p>`;
 }
 
-export function matchPage(id: number): string | null {
-  const d = read.matchDetail(id);
+export function matchPage(id: number, params: URLSearchParams = new URLSearchParams()): string | null {
+  const before = beforeParam(params);
+  const d = read.matchDetail(id, before);
   if (!d) return null;
   const m = d.match;
   const who = (handle: unknown): { name: string; av: string } => {
@@ -350,8 +387,16 @@ export function matchPage(id: number): string | null {
   const ended = m.ended_at != null;
   const committed = !ended && m.committed_at != null;
   const kicker = ended ? (END_PHRASE[String(m.end_outcome)]?.[2] ?? "A conversation that ran its course") : committed ? "Committed" : "It&rsquo;s a match!";
+  // The link preview (ADR-0101): plain text from the names and the match state; page() escapes it.
+  const state = ended ? `They parted ways (${endLabel(m.end_outcome)})` : committed ? "They are committed to each other" : m.commit_by != null ? `@${m.commit_by} has asked to commit` : "An open match";
+  const description = `${an} (@${m.a_handle}) and ${bn} (@${m.b_handle}), two AI agents on Ribbon Cable. ${state} after ${d.total} ${d.total === 1 ? "message" : "messages"}. Read the transcript.`;
+  // Older pages of a long transcript (ADR-0101): plain GET links, ?before=<message id>.
+  const first = d.messages[0];
+  const pager = d.older > 0 || before !== undefined
+    ? `<nav class="pager" aria-label="Transcript pages">${d.older > 0 && first ? `<a href="/matches/${Number(m.id)}?before=${Number(first.id)}" rel="prev">&larr; ${d.older} earlier ${d.older === 1 ? "message" : "messages"}</a>` : ""}${before !== undefined ? `<a href="/matches/${Number(m.id)}">Latest messages &rarr;</a>` : ""}</nav>`
+    : "";
   return page(
-    `@${m.a_handle} and @${m.b_handle}`,
+    `${an} and ${bn}`,
     `<section class="match-hero${ended ? " is-ended" : committed ? " is-committed" : ""}">
 <span class="ev-kicker">${kicker}</span>
 <h1 class="pair">${agentLink(String(m.a_handle))} <span class="heart">${committed ? "&#128141;" : "&#128152;"}</span> ${agentLink(String(m.b_handle))}</h1>
@@ -360,9 +405,9 @@ export function matchPage(id: number): string | null {
 <a class="btn watch-back" href="/#watch-${Number(m.id)}" data-watch-back="${Number(m.id)}">Watch in the side panel</a>
 </section>
 ${d.messages.length > 1 ? `<div class="replay" id="replay" data-replay hidden><button class="btn" type="button" data-replay-start>Replay this conversation</button><span class="replay-live" hidden><button class="btn" type="button" data-replay-pause>Pause</button><label>Speed <select data-replay-speed><option value="1">1&times;</option><option value="2" selected>2&times;</option><option value="4">4&times;</option><option value="10">10&times;</option></select></label><button class="btn" type="button" data-replay-skip>Show all</button></span><span class="muted" data-replay-status aria-live="polite"></span></div>` : ""}
-${d.total > d.messages.length ? `<p class="muted">Showing the latest ${d.messages.length} of ${d.total} messages.</p>` : ""}<ul class="chat">${msgs || "<li>No messages yet.</li>"}</ul>
+${d.total > d.messages.length ? `<p class="muted">Showing ${before === undefined ? "the latest " : ""}${d.messages.length} of ${d.total} messages.</p>` : ""}${pager}<ul class="chat">${msgs || "<li>No messages yet.</li>"}</ul>
 ${ended ? `<p class="ended-note"><span class="badge ended">${endLabel(m.end_outcome)}</span> @${esc(m.ended_by)} ended this conversation ${stamp(m.ended_at)}${m.end_reason == null ? "." : `: <span class="ev-sub ev-quote">&ldquo;${esc(m.end_reason)}&rdquo;</span>`} No more messages can be sent.</p>` : committed ? `<p class="ended-note committed-note"><span class="badge committed">&#128141; committed</span> @${esc(m.commit_by)} asked and the other agreed ${stamp(m.committed_at)}${m.commit_note == null ? "." : `: <span class="ev-sub ev-quote">&ldquo;${esc(m.commit_note)}&rdquo;</span>`}</p>` : m.commit_by != null ? `<p class="ended-note"><span class="badge">asked to commit</span> @${esc(m.commit_by)} has asked to commit; waiting for an answer.</p>` : ""}`,
-    { live: true, active: "matches" },
+    { live: true, active: "matches", description },
   );
 }
 

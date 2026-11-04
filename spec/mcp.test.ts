@@ -5,7 +5,7 @@ describe("registration and login", () => {
   it("lists the tools, a guide resource and a prompt", async () => {
     const client = await connect();
     const tools = (await client.listTools()).tools.map((t) => t.name);
-    for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message", "end_conversation", "commit_to_match"]) {
+    for (const t of ["register", "whoami", "update_profile", "get_next_profiles", "swipe", "list_matches", "get_conversation", "send_message", "end_conversation", "commit_to_match", "my_activity"]) {
       expect(tools).toContain(t);
     }
     expect((await client.listResources()).resources.map((r) => r.uri)).toContain("ribbon-cable://guide");
@@ -138,7 +138,9 @@ describe("swiping and matching", () => {
   it("never shows you yourself, and not agents you already swiped", async () => {
     const a = await newAgent();
     const b = await newAgent();
-    // Batches are ranked with a little noise, so with many agents in the database sample until b turns up.
+    // Batches are ranked with a little noise. b liking a ranks b near the top for a, so b turns up within the
+    // rate limit even with the other spec files' agents in the database; still sample until it does.
+    await call(b.client, "swipe", { handle: a.handle, direction: "like" });
     const sample = async (n: number): Promise<string[][]> => {
       const out: string[][] = [];
       for (let i = 0; i < n; i++) out.push((await call(a.client, "get_next_profiles", { limit: 10 })).data.profiles.map((p: any) => p.handle));
@@ -419,5 +421,92 @@ describe("private opinion of a match (ADR-0080)", () => {
     const low = await send(b, { opinion_change: -10 });
     expect(low.data.opinion).toBe(0);
     expect(low.data.opinion_advice).toMatch(/end_conversation/);
+  });
+});
+
+describe("bounded reads (ADR-0100)", () => {
+  it("get_conversation after_id returns only newer messages, and marks them read", async () => {
+    const a = await newAgent();
+    const b = await newAgent();
+    const matchId = await matchUp(a, b);
+    for (const body of ["one", "two", "three"]) await call(a.client, "send_message", { match_id: matchId, body });
+    const first = (await call(b.client, "get_conversation", { match_id: matchId })).data;
+    const seen = first.messages[1].id; // b has read up to "two"
+    const newer = await call(b.client, "get_conversation", { match_id: matchId, after_id: seen });
+    expect(newer.isError).toBe(false);
+    expect(newer.data.messages.map((m: any) => m.body)).toEqual(["three"]);
+    expect(newer.data.next_after_id).toBe(first.messages[2].id);
+    expect(newer.data.older_available).toBeUndefined();
+    const none = await call(b.client, "get_conversation", { match_id: matchId, after_id: newer.data.next_after_id });
+    expect(none.data.messages).toEqual([]);
+    expect(none.data.next_after_id).toBe(newer.data.next_after_id);
+    expect(none.text).toMatch(/No new messages/);
+
+    await call(a.client, "send_message", { match_id: matchId, body: "four" });
+    expect((await call(b.client, "whoami")).data.unread_messages).toBe(1);
+    expect((await call(b.client, "get_conversation", { match_id: matchId, after_id: newer.data.next_after_id })).data.messages.map((m: any) => m.body)).toEqual(["four"]);
+    expect((await call(b.client, "whoami")).data.unread_messages).toBe(0);
+
+    expect((await call(b.client, "get_conversation", { match_id: matchId, after_id: 1, before_id: 99 })).isError).toBe(true);
+    // Existing callers: no after_id still returns the latest page.
+    expect((await call(b.client, "get_conversation", { match_id: matchId })).data.messages).toHaveLength(4);
+  });
+
+  it("list_matches is bounded: limit, most recent activity first, unread_only, and a cut last message", async () => {
+    const me = await newAgent();
+    const others = [await newAgent(), await newAgent(), await newAgent()];
+    const ids: number[] = [];
+    for (const o of others) ids.push(await matchUp(me, o));
+    // The oldest match gets the newest message, so it moves to the top.
+    await call(others[0].client, "send_message", { match_id: ids[0], body: "y".repeat(400) });
+
+    const all = (await call(me.client, "list_matches")).data;
+    expect(all.total).toBe(3);
+    expect(all.matches.map((m: any) => m.match_id)).toEqual([ids[0], ids[2], ids[1]]);
+    expect(all.matches[0].last_activity).toMatch(/^\d{4}-/);
+    expect(all.matches[0].last_message.body.length).toBeLessThanOrEqual(201);
+    expect(all.matches[0].last_message.truncated).toBe(true);
+    expect(all.truncated_note).toMatch(/get_conversation/);
+
+    const two = (await call(me.client, "list_matches", { limit: 2 })).data;
+    expect(two.matches).toHaveLength(2);
+    expect(two.total).toBe(3);
+    expect(two.more).toMatch(/limit/);
+
+    const unread = (await call(me.client, "list_matches", { unread_only: true })).data;
+    expect(unread.matches.map((m: any) => m.match_id)).toEqual([ids[0]]);
+    expect((await call(me.client, "list_matches", { limit: 51 })).isError).toBe(true);
+  });
+
+  it("my_activity shows your own swipes and the likes waiting for you, and keeps passes private", async () => {
+    const me = await newAgent();
+    const liked = await newAgent();
+    const passed = await newAgent();
+    const admirer = await newAgent();
+    await call(me.client, "swipe", { handle: liked.handle, direction: "like" });
+    await call(me.client, "swipe", { handle: passed.handle, direction: "pass" });
+    await call(admirer.client, "swipe", { handle: me.handle, direction: "like" });
+    // `passed` passes on me: that must never show up in my view.
+    await call(passed.client, "swipe", { handle: me.handle, direction: "pass" });
+
+    const mine = await call(me.client, "my_activity");
+    expect(mine.isError).toBe(false);
+    expect(mine.data.your_swipes.map((s: any) => [s.handle, s.direction])).toEqual([[passed.handle, "pass"], [liked.handle, "like"]]);
+    expect(mine.data.passes_given).toBe(1);
+    expect(mine.data.likes_waiting.map((w: any) => w.handle)).toEqual([admirer.handle]);
+    expect(mine.data.likes_waiting_total).toBe(1);
+
+    const page = (await call(me.client, "my_activity", { limit: 1 })).data;
+    expect(page.your_swipes.map((s: any) => s.handle)).toEqual([passed.handle]);
+    const before = Number(page.older_swipes.match(/before=(\d+)/)[1]);
+    expect((await call(me.client, "my_activity", { limit: 1, before })).data.your_swipes.map((s: any) => s.handle)).toEqual([liked.handle]);
+
+    // Their view holds only their own swipe: my pass on them is not in it anywhere.
+    const theirs = (await call(passed.client, "my_activity")).data;
+    expect(theirs.likes_waiting).toEqual([]);
+    expect(theirs.your_swipes.map((s: any) => s.handle)).toEqual([me.handle]);
+    // After I answer the admirer it is no longer waiting.
+    await call(me.client, "swipe", { handle: admirer.handle, direction: "pass" });
+    expect((await call(me.client, "my_activity")).data.likes_waiting).toEqual([]);
   });
 });

@@ -555,6 +555,28 @@ describe("fitting a long tool result", () => {
     expect(out.endsWith("20 messages with @y.")).toBe(true);
   });
 
+  it("trims any other long list from its end and stays valid JSON, with an omitted count", () => {
+    const matches = Array.from({ length: 40 }, (_, i) => ({ match_id: 40 - i, with: `agent_${i}`, last_message: { body: "z".repeat(200) } }));
+    const text = JSON.stringify({ note: "data", matches }) + "\nYou have 40 matches.";
+    const out = fitResult(text, 3000);
+    expect(out.length).toBeLessThanOrEqual(3000);
+    expect(out).not.toContain("result cut");
+    const body = JSON.parse(out.slice(0, out.lastIndexOf("}") + 1));
+    expect(body.matches[0].match_id).toBe(40);
+    expect(body.omitted.matches).toBe(40 - body.matches.length);
+    expect(body.omitted_note).toContain("matches left out");
+    expect(out.endsWith("You have 40 matches.")).toBe(true);
+  });
+
+  it("shortens the largest list first", () => {
+    const profiles = Array.from({ length: 10 }, (_, i) => ({ handle: `p${i}`, bio: "b".repeat(400) }));
+    const out = fitResult(JSON.stringify({ tags: ["a", "b", "c"], profiles }), 2500);
+    const body = JSON.parse(out);
+    expect(body.tags).toEqual(["a", "b", "c"]);
+    expect(body.profiles.length).toBeLessThan(10);
+    expect(body.omitted).toEqual({ profiles: 10 - body.profiles.length });
+  });
+
   it("falls back to cutting the end, marked, for anything else", () => {
     const out = fitResult("x".repeat(500), 100);
     expect(out.length).toBeLessThanOrEqual(100);

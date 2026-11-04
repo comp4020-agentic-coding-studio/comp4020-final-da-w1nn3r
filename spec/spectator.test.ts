@@ -657,7 +657,15 @@ describe("stats page and relationship graph (ADR-0084)", () => {
     await call(a.client, "commit_to_match", { match_id: matchId });
     await call(b.client, "commit_to_match", { match_id: matchId });
 
-    const raw = await (await get("/graph.json")).text();
+    // /graph.json and /stats are cached and rebuilt at most every 5 s (ADR-0099): wait for the new data.
+    const fresh = async (path: string, ok: (text: string) => boolean): Promise<string> => {
+      for (let i = 0; ; i++) {
+        const text = await (await get(path)).text();
+        if (ok(text) || i >= 40) return text;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    };
+    const raw = await fresh("/graph.json", (t) => t.includes(c.handle) && t.includes('"committed"'));
     const g = JSON.parse(raw);
     const handles = g.nodes.map((n: any) => n.handle);
     expect(handles).toEqual(expect.arrayContaining([a.handle, b.handle, c.handle]));
@@ -668,7 +676,7 @@ describe("stats page and relationship graph (ADR-0084)", () => {
     // Colours and the legend go by model family, not the exact name (ADR-0094).
     const d = await newAgent("grd", { model: "gemma-4-26B-A4B-it-UD-IQ4_XS" });
     const e = await newAgent("gre", { model: "Gemma4-26B-A4B-Balanced-IQ4_XS" });
-    const g2 = await (await get("/graph.json")).json();
+    const g2 = JSON.parse(await fresh("/graph.json", (t) => t.includes(d.handle) && t.includes(e.handle)));
     const [nd, ne] = [d, e].map((x) => g2.nodes.find((n: any) => n.handle === x.handle));
     expect(nd?.family).toBe("Gemma");
     expect(ne?.slot).toBe(nd?.slot);
@@ -678,16 +686,93 @@ describe("stats page and relationship graph (ADR-0084)", () => {
     expect(nc?.family).toBe("Unidentified");
     expect(nc?.slot).toBe(7);
 
-    const stats = await (await get("/stats")).text();
+    const stats = await fresh("/stats", (t) => t.includes("Committed"));
     expect(stats).toContain("Committed");
     expect(stats).not.toContain("<img src=x");
 
-  });
+  }, 30_000); // waits out the 5 s cache floor (ADR-0099) up to twice
 
   it("is read-only: the new routes refuse writes", async () => {
     for (const path of ["/stats", "/graph.json"]) {
       const res = await fetch(new URL(path, baseUrl()), { method: "POST", body: "x" });
       expect(res.status, path).toBeGreaterThanOrEqual(400);
     }
+  });
+});
+
+describe("link previews, family filter and older pages (ADR-0101)", () => {
+  const tag = Math.random().toString(36).slice(2, 7);
+  const meta = (html: string, key: string): string | undefined => html.match(new RegExp(`<meta (?:name|property)="${key}" content="([^"]*)">`))?.[1];
+
+  it("gives every page a description and og tags, and builds a match page's from the escaped names and state", async () => {
+    for (const path of ["/", "/agents", "/matches", "/feed"]) {
+      const html = await (await get(path)).text();
+      expect(meta(html, "description"), path).toBeTruthy();
+      expect(meta(html, "og:title"), path).toBeTruthy();
+      expect(meta(html, "og:description"), path).toBeTruthy();
+    }
+    const a = await newAgent("og", { display_name: `Ann <b>"${tag}"</b>` });
+    const b = await newAgent("og", { display_name: "Bea" });
+    const id = await matchUp(a, b);
+    await call(a.client, "commit_to_match", { match_id: id });
+    const html = await (await get(`/matches/${id}`)).text();
+    expect(html).not.toContain(`<b>"${tag}"`);
+    expect(meta(html, "og:title")).toBe(`Ann &lt;b&gt;&quot;${tag}&quot;&lt;/b&gt; and Bea · Ribbon Cable`);
+    const desc = meta(html, "og:description")!;
+    expect(desc).toContain(`@${a.handle}`);
+    expect(desc).toContain(`@${b.handle}`);
+    expect(desc).toContain("asked to commit");
+    expect(meta(html, "description")).toBe(desc);
+  });
+
+  it("groups models by family in the dropdowns and filters by a whole family", async () => {
+    const g1 = await newAgent("fam", { model: `gemma-spec-${tag}-a` });
+    const g2 = await newAgent("fam", { model: `Gemma-spec-${tag}-b` });
+    const q = await newAgent("fam", { model: `qwen-spec-${tag}` });
+    const gq = await matchUp(g1, q);
+    const gg = await matchUp(g1, g2);
+    const agents = await (await get("/agents")).text();
+    expect(agents).toMatch(/<optgroup label="Gemma"><option value="family:Gemma">All Gemma \(\d+\)<\/option>/);
+    expect(agents).toContain(`<option value="gemma-spec-${tag}-a">`);
+    const handles = (html: string): string[] => [...html.matchAll(/data-handle="([^"]+)"/g)].map((m) => m[1]);
+    const gemmas = handles(await (await get(`/agents?model=family%3AGemma&q=fam_`)).text());
+    expect(gemmas).toEqual(expect.arrayContaining([g1.handle, g2.handle]));
+    expect(gemmas).not.toContain(q.handle);
+    expect(await (await get("/agents?model=family%3AGemma")).text()).toContain('<option value="family:Gemma" selected>');
+    const ids = (html: string): number[] => [...html.matchAll(/<a class="mc-pair" href="\/matches\/(\d+)">/g)].map((m) => Number(m[1]));
+    const pairs = ids(await (await get("/matches?model=family%3AGemma&with=family%3AQwen")).text());
+    expect(pairs).toContain(gq);
+    expect(pairs).not.toContain(gg);
+    // An unknown family is ignored, like an unknown model.
+    expect(await (await get("/matches?model=family%3ANoSuchFamily")).text()).not.toContain("No conversations match");
+  });
+
+  it("pages back through the feed and a transcript with plain ?before= links", async () => {
+    const a = await newAgent("page");
+    const b = await newAgent("page");
+    const id = await matchUp(a, b);
+    for (const body of ["first", "second", "third"]) await call(a.client, "send_message", { match_id: id, body });
+    const latest = await (await get(`/matches/${id}`)).text();
+    const msgIds = [...latest.matchAll(/<li class="msg [^"]*" data-at="\d+">/g)].length;
+    expect(msgIds).toBe(3);
+    // The third message's id, from the feed row that links it.
+    const feed = await (await get("/feed")).text();
+    const evId = Number(feed.match(new RegExp(`data-id="(\\d+)" data-type="message" data-match="${id}"`))?.[1]);
+    expect(evId).toBeGreaterThan(0);
+    const older = await (await get(`/feed?before=${evId}`)).text();
+    expect(older).not.toContain(`data-id="${evId}"`);
+    expect(older).toContain('href="/feed">&larr; Newest</a>');
+    expect(older).not.toContain("/static/feed.js");
+    expect((await get("/feed?before=abc")).status).toBe(200);
+
+    // A transcript page before the newest message holds the earlier ones and links back to the latest.
+    const conv = (await call(b.client, "get_conversation", { match_id: id })).data;
+    const page = await (await get(`/matches/${id}?before=${conv.messages[2].id}`)).text();
+    expect(page).toContain("<p>first</p>");
+    expect(page).toContain("<p>second</p>");
+    expect(page).not.toContain("<p>third</p>");
+    expect(page).toContain(`href="/matches/${id}">Latest messages &rarr;</a>`);
+    expect((await get(`/matches/${id}?before=-1`)).status).toBe(200);
+    expect((await fetch(new URL(`/feed?before=${evId}`, baseUrl()), { method: "POST" })).status).toBe(405);
   });
 });
