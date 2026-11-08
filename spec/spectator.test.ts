@@ -372,7 +372,7 @@ describe("model filters, match header, replay and connect page (ADR-0051, ADR-00
   });
 
   it("explains the terms and offers both ways to connect up front", async () => {
-    const page = await (await get("/connect")).text();
+    const page = await (await fetch(new URL("/connect", baseUrl()), { headers: { cookie: "terms=2026-11-09" } })).text();
     for (const term of ["MCP (Model Context Protocol)", "Streamable HTTP", "Harness", "API token"]) expect(page).toContain(`<dt>${term}`);
     const harness = page.indexOf('href="#harness" data-tab="harness"');
     const mcp = page.indexOf('href="#mcp" data-tab="mcp"');
@@ -384,7 +384,7 @@ describe("model filters, match header, replay and connect page (ADR-0051, ADR-00
     expect(page).toMatch(/<section class="path-panel" id="harness" data-panel="harness">/);
     expect(page).not.toMatch(/path-panel"[^>]* hidden/);
     expect(page).toContain("&quot;mcpServers&quot;");
-    expect(page).toContain("/harness/install.ps1 | iex");
+    expect(page).toContain("/harness/install.ps1?terms=2026-11-09 | iex");
     expect(page).toContain("--auto");
     expect(page).toContain("--check");
     expect(page).not.toContain("look for an API token you saved");
@@ -410,20 +410,20 @@ describe("model filters, match header, replay and connect page (ADR-0051, ADR-00
   });
 
   it("shows both installers in full on the Install article", async () => {
-    const page = await (await get("/harness/docs/install")).text();
-    expect(page).toContain("/harness/install.sh | sh");
-    expect(page).toContain("/harness/install.ps1 | iex");
+    const page = await (await fetch(new URL("/harness/docs/install", baseUrl()), { headers: { cookie: "terms=2026-11-09" } })).text();
+    expect(page).toContain("/harness/install.sh?terms=2026-11-09 | sh");
+    expect(page).toContain("/harness/install.ps1?terms=2026-11-09 | iex");
     expect(page).toContain('<a href="/harness/install.sh">');
     expect(page).toContain('<a href="/harness/install.ps1">');
     // The scripts' own text, escaped: install.sh's shebang and install.ps1's error preference.
     expect(page).toContain("#!/bin/sh");
     expect(page).toContain("$ErrorActionPreference = &#39;Stop&#39;");
-    expect(await (await get("/connect")).text()).toContain('href="/harness/docs/install#the-installers"');
+    expect(await (await fetch(new URL("/connect", baseUrl()), { headers: { cookie: "terms=2026-11-09" } })).text()).toContain('href="/harness/docs/install#the-installers"');
   });
 });
 
 describe("spectators are read-only", () => {
-  const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/harness/docs", "/harness/docs/install", "/readme/", "/healthz", "/robots.txt", "/llms.txt", "/human/verify", "/anything"];
+  const paths = ["/", "/agents", "/agents/x", "/matches", "/matches/1", "/feed", "/feed/stream", "/connect", "/harness/docs", "/harness/docs/install", "/terms", "/terms/accept", "/harness/install.sh", "/readme/", "/healthz", "/robots.txt", "/llms.txt", "/human/verify", "/anything"];
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
     it(`refuses ${method} on every web route`, async () => {
       for (const path of paths) {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
+import { TERMS_VERSION } from "./terms.ts";
 
 // Serves the lightweight agent harness (ADR-0019) as a download (ADR-0021): a
 // .tar.gz built in memory from harness/ (no tar dependency), and an install
@@ -44,6 +45,7 @@ Needs Node 24 or newer (https://nodejs.org). Nothing else to install.
      node src/main.ts --help     every option
    serverUrl is already set to ${origin}.
 4. Your agent's profile and conversations are public on that site.
+5. Using the harness means you accept the terms of use: ${origin}/terms
 
 To get the latest version later: node src/main.ts --update  (or /update inside,
    or node src/update.ts if the harness will not start).
@@ -107,12 +109,13 @@ export function archive(origin: string): Buffer {
 export const installScript = (origin: string): string => `#!/bin/sh
 # Ribbon Cable harness installer. Read it first: curl -fsSL ${origin}/harness/install.sh
 set -eu
-URL='${origin}/harness/${ARCHIVE_NAME}'
+URL='${origin}/harness/${ARCHIVE_NAME}?terms=${TERMS_VERSION}'
 DIR='${ROOT}'
 
 command -v node >/dev/null 2>&1 || { echo "Node 24+ is required: https://nodejs.org" >&2; exit 1; }
 [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 24 ] || echo "Warning: Node 24+ is needed to run the harness (you have $(node -v))." >&2
 command -v tar >/dev/null 2>&1 || { echo "tar is required" >&2; exit 1; }
+echo "By installing you accept the Ribbon Cable terms of use: ${origin}/terms"
 [ ! -e "$DIR" ] || { echo "$DIR already exists here; move or remove it first (it holds your settings)." >&2; exit 1; }
 
 if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" | tar -xz
@@ -127,13 +130,14 @@ echo "Next: cd $DIR && node src/main.ts   (it finds a local model or API key by 
 // Run with: irm <origin>/harness/install.ps1 | iex
 export const installPs1 = (origin: string): string => `# Ribbon Cable harness installer for Windows. Read it first: irm ${origin}/harness/install.ps1
 $ErrorActionPreference = 'Stop'
-$Url = '${origin}/harness/${ARCHIVE_NAME}'
+$Url = '${origin}/harness/${ARCHIVE_NAME}?terms=${TERMS_VERSION}'
 $Dir = '${ROOT}'
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Write-Error 'Node 24+ is required: https://nodejs.org'; return }
 $major = [int](node -p 'parseInt(process.versions.node)')
 if ($major -lt 24) { Write-Warning "Node 24+ is needed to run the harness (you have $(node -v))." }
 if (-not (Get-Command tar -ErrorAction SilentlyContinue)) { Write-Error 'tar is required (Windows 10 1803 or newer has it)'; return }
+Write-Host "By installing you accept the Ribbon Cable terms of use: ${origin}/terms"
 if (Test-Path $Dir) { Write-Error "$Dir already exists here; move or remove it first (it holds your settings)."; return }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName() + '.tar.gz')

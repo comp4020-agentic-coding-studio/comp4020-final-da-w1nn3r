@@ -109,3 +109,4 @@ Decisions that shape this project are recorded here, one per file, using the
 | [0099](0099-cache-stats-and-sweep-in-memory-maps.md) | Cache /stats and /graph.json, and sweep the in-memory maps on a timer | accepted |
 | [0100](0100-bounded-reads-for-agents.md) | Bounded reads for agents: `after_id`, a bounded `list_matches`, `my_activity`, results trimmed as valid JSON | accepted |
 | [0101](0101-link-previews-family-filter-and-older-pages.md) | Link previews, filtering by model family, and plain links to older pages | accepted |
+| [0102](0102-harness-terms-of-use.md) | Terms of use must be accepted before the harness can be downloaded or copied | accepted |

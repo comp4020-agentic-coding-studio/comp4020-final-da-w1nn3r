@@ -9,6 +9,7 @@ import { checkSolution, humanCookie, isHuman, newChallenge } from "./human.ts";
 import { allow } from "./ratelimit.ts";
 import { ARCHIVE_NAME, archive, installPs1, installScript, updateManifest, validOrigin } from "./harness-dist.ts";
 import { listenerCount, onNewEvent } from "./events.ts";
+import { TERMS_VERSION, safeNext, termsAccepted, termsCookie } from "./terms.ts";
 import { log, safeName, safePath } from "./log.ts";
 import { buildServer } from "./mcp.ts";
 import * as read from "./read.ts";
@@ -258,18 +259,28 @@ function handleWeb(req: IncomingMessage, res: ServerResponse): void {
   }
   if (path === "/robots.txt") return send(res, 200, robotsTxt(publicOrigin(req)), "text/plain; charset=utf-8", { "cache-control": "public, max-age=3600" });
   if (path === "/llms.txt") return send(res, 200, llmsTxt(publicOrigin(req)), "text/plain; charset=utf-8", { "cache-control": "public, max-age=3600" });
-  if (path === "/connect") return html(res, 200, web.connectPage(publicOrigin(req)));
+  // Harness terms of use (ADR-0102). Accepting is a GET that sets a cookie: no spectator route takes a write.
+  if (path === "/terms") return send(res, 200, web.termsPage(safeNext(url.searchParams.get("next"))), "text/html; charset=utf-8", { "cache-control": "no-store" });
+  if (path === "/terms/accept") return send(res, 303, "", "text/plain", { location: safeNext(url.searchParams.get("next")), "set-cookie": termsCookie(req), "cache-control": "no-store" });
+  if (path === "/connect") return send(res, 200, web.connectPage(publicOrigin(req), termsAccepted(req)), "text/html; charset=utf-8", { vary: "cookie" });
   // The harness page merged into /connect (ADR-0044); keep old links working.
   if (path === "/harness") return send(res, 301, "", "text/plain", { location: "/connect#harness" });
   if (path === "/harness/docs" || (m = path.match(/^\/harness\/docs\/([a-z0-9-]+)$/))) {
-    const body = web.harnessDocsPage(publicOrigin(req), path === "/harness/docs" ? undefined : m![1]);
-    return body ? html(res, 200, body) : notFound(res);
+    const body = web.harnessDocsPage(publicOrigin(req), path === "/harness/docs" ? undefined : m![1], termsAccepted(req));
+    return body ? send(res, 200, body, "text/html; charset=utf-8", { vary: "cookie" }) : notFound(res);
   }
   if (path === "/harness/version.json") return send(res, 200, JSON.stringify({ version: updateManifest().version }), "application/json", { "cache-control": "no-cache" });
   if (path === "/harness/update.json") return send(res, 200, JSON.stringify(updateManifest()), "application/json", { "cache-control": "no-cache" });
   if (path === "/harness/install.sh" || path === "/harness/install.ps1" || path === `/harness/${ARCHIVE_NAME}`) {
     const o = publicOrigin(req);
     if (!validOrigin(o)) return send(res, 400, "Unrecognised Host header.", "text/plain");
+    // The terms come first (ADR-0102). The commands the site shows after acceptance carry ?terms=<version>, so
+    // curl and PowerShell work without a cookie; a browser without either is sent to read and accept.
+    if (!termsAccepted(req) && url.searchParams.get("terms") !== TERMS_VERSION) {
+      if (String(req.headers.accept ?? "").includes("text/html")) return send(res, 302, "", "text/plain", { location: `/terms?next=${encodeURIComponent(path)}`, "cache-control": "no-store" });
+      return send(res, 403, `Accept the terms of use before downloading the harness: ${o}/terms
+`, "text/plain", { "cache-control": "no-store" });
+    }
     if (path.endsWith(".ps1")) return send(res, 200, installPs1(o), "text/plain; charset=utf-8");
     return path.endsWith(".sh")
       ? send(res, 200, installScript(o), "text/x-shellscript; charset=utf-8")

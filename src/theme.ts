@@ -430,6 +430,25 @@ figure.code pre{margin:0;border:0;border-radius:0;background:none;line-height:1.
 @media(max-width:56rem){.docs{grid-template-columns:minmax(0,1fr)}.docs-toc{position:static;max-height:none;padding:.4rem .6rem}
   .docs-toc .docs-groups,.docs-toc .btn{display:none}
   .docs-body{padding:1rem 1.1rem 1.4rem}.doc-pager{grid-template-columns:1fr}.docs-body td:first-child,.docs-body th:first-child{width:auto}.docs-body code{overflow-wrap:anywhere}}
+.terms{max-width:46rem;margin:0 auto}
+.terms .crumb{margin:0 0 .4rem;font:.78rem var(--mono);color:var(--muted)}
+.terms-scroll{max-height:26rem;overflow-y:auto;padding:1rem 1.4rem;font-size:.82rem;line-height:1.55;color:var(--muted)}
+.terms-scroll h2{margin:1.1rem 0 .3rem;font-size:.85rem;letter-spacing:.04em;text-transform:uppercase;color:var(--fg)}
+.terms-scroll h2:first-child{margin-top:0}
+.terms-scroll p{margin:.3rem 0}
+.terms .cta{margin:1.2rem 0 .8rem}
+.terms-blur{position:relative;margin:.6rem 0}
+.terms-blur-body{filter:blur(7px);opacity:.75;user-select:none;pointer-events:none}
+.terms-reveal{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:.5rem;font-weight:600;color:var(--fg);background:color-mix(in srgb,var(--bg) 35%,transparent);border-radius:12px}
+.terms-reveal:hover{text-decoration:none;background:color-mix(in srgb,var(--bg) 20%,transparent)}
+.terms-blur-inline{filter:blur(5px);user-select:none;cursor:pointer;color:inherit}
+.terms-blur-inline:hover{text-decoration:none;filter:blur(4px)}
+.terms-dialog{max-width:44rem;width:calc(100% - 2rem);max-height:calc(100vh - 2rem);padding:1.3rem 1.5rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg2);color:var(--fg);overflow:auto}
+.terms-dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(4px)}
+.terms-dialog h2{margin:0 0 .4rem}.terms-dialog h2 small{font:.75rem var(--mono);color:var(--muted);margin-left:.5rem}
+.terms-dialog .terms-scroll{max-height:min(22rem,50vh);margin:.8rem 0;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.terms-dialog .cta{margin:.6rem 0 0}
+.terms-dialog .btn{font:inherit;font-weight:600;cursor:pointer}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 `;
 
@@ -538,6 +557,21 @@ export const APP_JS = `
     for (const t of tabs) t.addEventListener("click", (e) => { e.preventDefault(); show(t.dataset.tab, true); });
     const want = location.hash.slice(1);
     show(tabs.some((t) => t.dataset.tab === want) ? want : tabs[0].dataset.tab, false);
+  }
+
+  // Terms of use (ADR-0102): anything that needs the terms opens the dialog; accepting goes on to where it was
+  // heading, and a download leaves this page open, so it reloads to lift the blur. Without scripts each is a link to /terms.
+  const termsDlg = document.getElementById("terms-dialog");
+  if (termsDlg && termsDlg.showModal) {
+    const accept = termsDlg.querySelector("[data-terms-accept]");
+    for (const t of document.querySelectorAll("[data-terms-next]")) t.addEventListener("click", (e) => {
+      e.preventDefault();
+      accept.href = "/terms/accept?next=" + encodeURIComponent(t.dataset.termsNext);
+      termsDlg.showModal();
+    });
+    termsDlg.querySelector("[data-terms-close]").addEventListener("click", () => termsDlg.close());
+    termsDlg.addEventListener("click", (e) => { if (e.target === termsDlg) termsDlg.close(); });
+    accept.addEventListener("click", () => { if (accept.href.includes("tar.gz")) setTimeout(() => location.reload(), 1200); });
   }
 
   // Code boxes in the harness docs (ADR-0092): a Copy button, shown only where the clipboard can be written.
