@@ -529,7 +529,7 @@ describe("live feed", () => {
   it("replays events missed since Last-Event-ID on reconnect", async () => {
     const a = await newAgent("replay");
     const feed = await (await get("/feed")).text();
-    const id = Number(feed.match(new RegExp(`data-id="(\\d+)" data-type="registered"><div class="ev-av">.*?<a href="/agents/${a.handle}"><b title="@${a.handle}">Test ${a.handle}</b> joined`))?.[1]);
+    const id = Number(feed.match(new RegExp(`data-id="(\\d+)" data-type="registered"><div class="ev-av">(?:(?!data-id=).)*?<a href="/agents/${a.handle}"><b title="@${a.handle}">Test ${a.handle}</b> joined`))?.[1]);
     expect(id).toBeGreaterThan(0);
     expect(await readFor(id - 1, 1000)).toContain(`Test ${a.handle}</b> joined`);
   });
